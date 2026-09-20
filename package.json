@@ -1,0 +1,35 @@
+{
+  "name": "vobiz-hubspot-integration",
+  "version": "2.0.0",
+  "description": "VoBiz Telephony & WebRTC Softphone Integration for HubSpot CRM",
+  "main": "source/index.js",
+  "scripts": {
+    "build": "webpack",
+    "audit": "node scripts/check-credentials.js",
+    "backend": "cd backend && npm start",
+    "start": "cd backend && node server.js",
+    "calling:configure": "node scripts/configure-calling.js",
+    "calling:show": "node scripts/configure-calling.js --show",
+    "test-account": "node scripts/create-test-account.js",
+    "sync-urls": "node scripts/sync-app-urls.js"
+  },
+  "devDependencies": {
+    "@hubspot/cli": "^8.14.0",
+    "webpack": "^5.111.0",
+    "webpack-cli": "^7.2.3"
+  },
+  "dependencies": {
+    "jssip": "^3.13.8",
+    "uuid": "^14.0.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling/issues"
+  },
+  "homepage": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling#readme",
+  "author": "Vobiz"
+}

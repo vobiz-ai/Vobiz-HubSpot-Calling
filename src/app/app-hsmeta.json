@@ -1,0 +1,35 @@
+{
+  "uid": "vobiz_calling_integration_app",
+  "type": "app",
+  "config": {
+    "description": "VoBiz Calling HubSpot CRM Integration",
+    "name": "VoBiz Calling Project App",
+    "distribution": "private",
+    "auth": {
+      "type": "oauth",
+      "redirectUrls": [
+        "https://YOUR_PUBLIC_HOST/hubspot/callback"
+      ],
+      "requiredScopes": [
+        "oauth"
+      ],
+      "optionalScopes": [],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": [
+        "https://api.hubapi.com",
+        "https://YOUR_PUBLIC_HOST"
+      ],
+      "iframe": [
+        "https://YOUR_PUBLIC_HOST"
+      ],
+      "img": []
+    },
+    "support": {
+      "supportEmail": "support@vobiz.ai",
+      "documentationUrl": "https://vobiz.ai/docs",
+      "supportUrl": "https://vobiz.ai/support"
+    }
+  }
+}

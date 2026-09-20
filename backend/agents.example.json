@@ -1,0 +1,12 @@
+{
+  "test-agent": {
+    "displayName": "Test Agent One",
+    "sipUser": "HubSpotAgentOne@registrar.vobiz.ai",
+    "sipPassword": "YOUR_SIP_PASSWORD"
+  },
+  "test-agent-2": {
+    "displayName": "Test Agent Two",
+    "sipUser": "HubSpotAgentTwo@registrar.vobiz.ai",
+    "sipPassword": "YOUR_SIP_PASSWORD"
+  }
+}

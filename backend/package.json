@@ -1,0 +1,25 @@
+{
+  "name": "vobiz-hubspot-backend",
+  "version": "1.0.0",
+  "description": "Backend Middleware Server for VoBiz HubSpot CRM Integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "node tunnel.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling/issues"
+  },
+  "homepage": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling#readme",
+  "author": "Vobiz"
+}
