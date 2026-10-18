@@ -31,11 +31,14 @@ drive. Never reintroduce one.
 
 ### What is not handled
 
-**The backend binds to a single Vobiz account.** Every agent who signs in shares
-one SIP endpoint. This is fine for a pilot and wrong for a real deployment.
+**Sign-in uses the account's Auth ID and Auth Token.** The backend checks them
+against Vobiz and returns an opaque session token; SIP credentials are served
+only against that token, and only the agent's own. But every agent who signs in
+this way holds the account's API credentials.
 
-**There is no per-agent identity.** The agent id selects a label, not an
-identity, and nothing stops a signed-in user from asserting another.
+**The agent id is chosen by the browser.** It decides which endpoint an agent
+gets; it does not prove who they are. Anyone holding the account's Auth Token
+can sign in as any agent id.
 
 **Secrets live in `.env`.** There is no secret manager, no encryption at rest,
 and no rotation. Treat the host as sensitive.
@@ -43,6 +46,6 @@ and no rotation. Treat the host as sensitive.
 **A quick tunnel is not production infrastructure.** Its hostname changes on
 every restart and it is publicly reachable while it is up.
 
-Deploying this as-is for real customer traffic needs, at minimum: an endpoint
-per agent, an identity store, a stable hostname, and secrets held somewhere
-better than a file.
+Deploying this as-is for real customer traffic needs, at minimum: an identity
+provider in front of `/login` (so agents never see the Auth Token), a stable
+hostname, and secrets held somewhere better than a file.
