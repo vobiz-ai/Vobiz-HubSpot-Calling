@@ -19,7 +19,13 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-try { process.loadEnvFile(path.join(__dirname, ".env")); } catch { /* env may come from the shell */ }
+// process.loadEnvFile needs Node 20.12+. On older Node it is undefined, and a
+// bare try/catch would swallow that and run with no configuration at all.
+if (typeof process.loadEnvFile !== "function") {
+  console.error("Node 20.12 or newer is required (process.loadEnvFile). Found " + process.version);
+  process.exit(1);
+}
+try { process.loadEnvFile(path.join(__dirname, ".env")); } catch { /* no .env: env may come from the shell */ }
 
 const clean = (v) => (v || "").trim().replace(/^["']|["']$/g, "");
 
@@ -57,13 +63,69 @@ const HUBSPOT_ENV = {
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
-for (const [k, v] of Object.entries({ VOBIZ_AUTH_ID: AUTH_ID, VOBIZ_AUTH_TOKEN: AUTH_TOKEN, VOBIZ_FROM_NUMBER: FROM_NUMBER, VOBIZ_SIP_USER: SIP_USER, VOBIZ_SIP_PASSWORD: SIP_PASSWORD })) {
-  if (!v) log(`⚠  ${k} is not set — the widget will not be able to register or call.`);
+// Single-endpoint mode: set VOBIZ_SIP_USER and VOBIZ_SIP_PASSWORD and every
+// agent registers as that one endpoint. Only correct for ONE agent — two
+// browsers registered as the same endpoint race for every inbound call.
+// Leave both empty and each agent gets an endpoint of their own.
+const SHARED_SIP = Boolean(SIP_USER && SIP_PASSWORD);
+const SESSION_TTL_MS = Number(clean(process.env.SESSION_TTL_HOURS) || 12) * 3600 * 1000;
+const ENDPOINT_STORE = clean(process.env.AGENT_ENDPOINT_STORE) || path.join(__dirname, "agent-endpoints.json");
+
+for (const [k, v] of Object.entries({ VOBIZ_AUTH_ID: AUTH_ID, VOBIZ_AUTH_TOKEN: AUTH_TOKEN, VOBIZ_FROM_NUMBER: FROM_NUMBER })) {
+  if (!v) log(`⚠  ${k} is not set.`);
 }
+if (SIP_USER && !SIP_PASSWORD) log("⚠  VOBIZ_SIP_USER is set without VOBIZ_SIP_PASSWORD — ignoring it; agents get their own endpoints.");
+log(SHARED_SIP
+  ? `SIP mode: shared endpoint ${SIP_USER} (single agent only)`
+  : "SIP mode: one endpoint per agent, created on first sign-in");
 
 // ─── state ───────────────────────────────────────────────────────────────────
-// agentId -> { authId, numbers, from }
+// Session token -> { kind, agentId, authId, authToken, numbers, from, sipUser,
+// sipPassword, epId, createdAt }. The token is the only thing that proves who
+// is calling: agentId is chosen by the browser and is a lookup key, never a
+// credential.
 const sessions = new Map();
+// `${kind}:${authId}:${agentId}` -> token, so signing in again replaces the old session.
+const sessionByAgent = new Map();
+
+const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function liveSessions() {
+  const now = Date.now();
+  for (const [token, s] of sessions) {
+    if (now - s.createdAt > SESSION_TTL_MS) dropSession(token);
+  }
+  return [...sessions.values()];
+}
+
+function openSession(data) {
+  const key = `${data.kind}:${data.authId}:${data.agentId}`;
+  const previous = sessionByAgent.get(key);
+  if (previous) sessions.delete(previous);
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { ...data, createdAt: Date.now() });
+  sessionByAgent.set(key, token);
+  return token;
+}
+
+function dropSession(token) {
+  const s = sessions.get(token);
+  if (!s) return;
+  sessions.delete(token);
+  const key = `${s.kind}:${s.authId}:${s.agentId}`;
+  if (sessionByAgent.get(key) === token) sessionByAgent.delete(key);
+}
+
+function sessionFrom(req) {
+  const m = /^Bearer\s+([a-f0-9]{64})$/i.exec(req.headers.authorization || "");
+  if (!m) return null;
+  const s = sessions.get(m[1]);
+  if (!s) return null;
+  if (Date.now() - s.createdAt > SESSION_TTL_MS) { dropSession(m[1]); return null; }
+  return { token: m[1], ...s, ref: s };
+}
+
+const sipUserPart = (v) => String(v || "").replace(/^sips?:/, "").split("@")[0];
 // A-leg CallUUID -> call record. Recordings are attributed to the A-leg UUID,
 // which makes it the right key for both the dial result and the file.
 const calls = new Map();
@@ -76,9 +138,6 @@ function getActiveAuth(recordingId) {
   if (recordingId && recordingMeta.has(recordingId)) {
     const c = recordingMeta.get(recordingId);
     if (c.authId && c.authToken) return { authId: c.authId, authToken: c.authToken, url: c.url };
-  }
-  for (const s of sessions.values()) {
-    if (s.authId && s.authToken) return { authId: s.authId, authToken: s.authToken, url: null };
   }
   return { authId: AUTH_ID, authToken: AUTH_TOKEN, url: null };
 }
@@ -98,9 +157,13 @@ function vobiz(method, apiPath, body, auth = {}) {
   const currentAuthToken = auth.authToken || AUTH_TOKEN;
   return new Promise((resolve) => {
     const data = body ? JSON.stringify(body) : null;
-    const req = https.request(
+    // http is accepted only so the test suite can stand in a fake Vobiz API.
+    const base = new URL(API_BASE);
+    const transport = base.protocol === "http:" ? http : https;
+    const req = transport.request(
       {
-        host: new URL(API_BASE).host,
+        hostname: base.hostname,
+        port: base.port || undefined,
         method,
         path: `/api/v1/Account/${currentAuthId}${apiPath}`,
         headers: {
@@ -122,6 +185,86 @@ function vobiz(method, apiPath, body, auth = {}) {
     if (data) req.write(data);
     req.end();
   });
+}
+
+// ─── per-agent SIP endpoints ─────────────────────────────────────────────────
+// One Vobiz endpoint per (account, agent). The mapping agent -> endpoint id is
+// persisted so a restart reuses the same endpoint instead of minting a new one;
+// the SIP password is NOT persisted. Each sign-in sets a fresh random password
+// on the agent's own endpoint and hands it to that agent's browser only.
+function loadEndpointStore() {
+  try { return JSON.parse(fs.readFileSync(ENDPOINT_STORE, "utf8")) || {}; } catch { return {}; }
+}
+
+function saveEndpointStore(store) {
+  const tmp = `${ENDPOINT_STORE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, ENDPOINT_STORE);
+}
+
+const freshSipPassword = () => `Vobiz${crypto.randomBytes(12).toString("hex")}9!`;
+
+const inflightEndpoints = new Map();
+
+/**
+ * Find or create the endpoint that belongs to this agent, set a new password on
+ * it, and return the identity the agent's browser registers as.
+ *
+ * POST /Endpoint/ rewrites the submitted username (send "hsagent", get
+ * "hsagent1187694299…" back), and the create response does not reliably carry
+ * the stored name — so the username is always read back with a GET.
+ */
+function ensureAgentEndpoint(auth, agentId) {
+  const key = `${auth.authId}:${agentId}`;
+  if (inflightEndpoints.has(key)) return inflightEndpoints.get(key);
+  const work = (async () => {
+    const store = loadEndpointStore();
+    let entry = store[key] || null;
+    let username = null;
+    const password = freshSipPassword();
+
+    if (entry) {
+      const got = await vobiz("GET", `/Endpoint/${encodeURIComponent(entry.endpointId)}/`, null, auth);
+      if (got.status === 404) {
+        log(`endpoint ${entry.endpointId} for ${agentId} no longer exists; creating a new one`);
+        delete store[key];
+        entry = null;
+      } else if (got.status >= 200 && got.status < 300 && got.body && got.body.username) {
+        username = got.body.username;
+        const upd = await vobiz("POST", `/Endpoint/${encodeURIComponent(entry.endpointId)}/`, { password }, auth);
+        if (upd.status >= 400) throw new Error(`Vobiz returned ${upd.status} setting the SIP password for ${agentId}`);
+      } else {
+        throw new Error(`Vobiz returned ${got.status} reading endpoint ${entry.endpointId}`);
+      }
+    }
+
+    if (!entry) {
+      const slug = agentId.replace(/[^A-Za-z0-9]/g, "").slice(0, 24) || "agent";
+      const created = await vobiz("POST", "/Endpoint/", {
+        username: `hs${slug}${crypto.randomBytes(3).toString("hex")}`,
+        password,
+        alias: `hubspot-${agentId}`.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64),
+      }, auth);
+      const endpointId = created.body && (created.body.endpoint_id || created.body.id);
+      if (created.status >= 400 || !endpointId) {
+        throw new Error(`Vobiz returned ${created.status} creating an endpoint for ${agentId}`);
+      }
+      const got = await vobiz("GET", `/Endpoint/${encodeURIComponent(endpointId)}/`, null, auth);
+      username = (got.body && got.body.username) || sipUserPart(created.body.sip_uri) || null;
+      if (!username) throw new Error(`Could not read back the stored username of endpoint ${endpointId}`);
+      entry = { endpointId: String(endpointId), username, createdAt: new Date().toISOString() };
+      store[key] = entry;
+      saveEndpointStore(store);
+      log(`created endpoint ${username} (${endpointId}) for agent ${agentId}`);
+    } else if (username !== entry.username) {
+      store[key] = { ...entry, username };
+      saveEndpointStore(store);
+    }
+
+    return { epId: String(entry.endpointId), sipUser: `${username}@${REGISTRAR}`, sipPassword: password };
+  })();
+  inflightEndpoints.set(key, work);
+  return work.finally(() => inflightEndpoints.delete(key));
 }
 
 // ─── recording links ─────────────────────────────────────────────────────────
@@ -154,7 +297,7 @@ const MEDIA_HOSTS = [
 const allowedMediaHost = (u) => {
   try {
     const p = new URL(u);
-    return (p.protocol === "https:" || p.protocol === "http:") && MEDIA_HOSTS.some((re) => re.test(p.hostname));
+    return p.protocol === "https:" && MEDIA_HOSTS.some((re) => re.test(p.hostname));
   } catch {
     return false;
   }
@@ -168,15 +311,17 @@ const ORIGIN_ALLOWLIST = [
   /^https:\/\/([a-z0-9-]+\.)*hubspotqa\.com$/i,
   /^https?:\/\/localhost(:\d+)?$/i,
   /^https?:\/\/127\.0\.0\.1(:\d+)?$/i,
-  /^https:\/\/([a-z0-9-]+\.)*trycloudflare\.com$/i,
-  /^https:\/\/([a-z0-9-]+\.)*ngrok-free\.app$/i,
-  /^https:\/\/([a-z0-9-]+\.)*ngrok\.app$/i,
 ];
+// Not a quick-tunnel suffix (Cloudflare, ngrok): anyone can mint a host there in
+// seconds, so allowing the suffix is the same as allowing every origin. This
+// backend's own public origin is allowed, because it serves the widget.
 const EXTRA_ORIGINS = clean(process.env.ALLOWED_ORIGINS).split(",").map((s) => s.trim()).filter(Boolean);
 
 function cors(req, res) {
   const origin = req.headers.origin;
-  if (origin && (EXTRA_ORIGINS.includes(origin) || ORIGIN_ALLOWLIST.some((re) => re.test(origin)))) {
+  let own = "";
+  try { own = publicBase() ? new URL(publicBase()).origin : ""; } catch { /* unset */ }
+  if (origin && (origin === own || EXTRA_ORIGINS.includes(origin) || ORIGIN_ALLOWLIST.some((re) => re.test(origin)))) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
@@ -257,7 +402,11 @@ async function ensureHubspotAppAndRouting(authId, authToken, epId, fromNumber) {
   try {
     const apps = await vobiz("GET", "/Application/?limit=50", null, { authId, authToken });
     const appList = (apps.body && (apps.body.objects || apps.body.items)) || [];
-    let app = appList.find((a) => a.app_name && a.app_name.toLowerCase().includes("hubspot")) || appList[0];
+    // Only ever an application this integration created. Falling back to the
+    // account's first application rewrote the answer_url of whatever else the
+    // customer runs on Vobiz.
+    let app = appList.find((a) => a.answer_url === answerUrl)
+      || appList.find((a) => a.app_name && a.app_name.toLowerCase().includes("hubspot"));
     let appId;
 
     if (app) {
@@ -342,22 +491,23 @@ const server = http.createServer(async (req, res) => {
     const attrs = (callerId) =>
       `callerId="${escXml(callerId)}" timeout="30" timeLimit="14400" action="${base}/dial-status" method="POST" redirect="false"`;
 
+    const hangup = (why) => {
+      log(`  -> ${why}; hanging up`);
+      return send(res, 200, `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Hangup/>\n</Response>`);
+    };
+
     if (fromBrowser) {
-      const cleanFromUser = (from.match(/^sip:([^@]+)@/) || [])[1] || from.replace(/^sip:/, "").split("@")[0];
-      let s = [...sessions.values()].find((x) => {
-        const xUser = (x.sipUser || "").replace(/^sip:/, "").split("@")[0];
-        return xUser === cleanFromUser || x.authId === cleanFromUser;
-      });
-      if (!s && sessions.size > 0) {
-        s = [...sessions.values()][sessions.size - 1];
-      }
-      const callerId = (s && s.from) || FROM_NUMBER || "+91XXXXXXXXXX";
+      // Outbound. The SIP From user is the agent's own endpoint, which is how
+      // the caller ID that agent picked is found.
+      const fromUser = sipUserPart(from);
+      const s = liveSessions().find((x) => sipUserPart(x.sipUser) === fromUser);
+      const callerId = (s && s.from) || FROM_NUMBER;
+      if (!callerId) return hangup(`no caller ID for sip:${fromUser} — sign in, or set VOBIZ_FROM_NUMBER`);
       let dest = to.replace(/[^\d+]/g, "");
-      if (dest && !dest.startsWith("+")) {
-        dest = `+${dest}`;
-      }
+      if (dest && !dest.startsWith("+")) dest = `+${dest}`;
+      if (!dest) return hangup("no destination number");
       remember({ callUuid, direction: "Outbound", from: callerId, to: dest, startedAt: Date.now() });
-      log(`  -> browser is the A leg, dialling out to ${dest} as ${callerId}`);
+      log(`  -> browser is the A leg (${fromUser}${s ? `, agent ${s.agentId}` : ""}), dialling out to ${dest} as ${callerId}`);
       return send(res, 200,
         `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${record}\n  <Dial ${attrs(callerId)}>\n    <Number>${escXml(dest)}</Number>\n  </Dial>\n</Response>`);
     }
@@ -365,18 +515,24 @@ const server = http.createServer(async (req, res) => {
     // Inbound PSTN. callerId must be a number this account owns — omit it and
     // Vobiz derives it from the A leg, which here is the *caller's* number, so
     // B-leg creation is refused silently and the browser never rings.
+    //
+    // Ring every signed-in agent who can take calls on the dialled number,
+    // simultaneously: sibling <User> children, first to answer wins. If no
+    // session claims the number, ring every signed-in agent on this account.
     const dialedNumber = toE164(to);
-    let matchedSession = [...sessions.values()].find((s) => (s.numbers && s.numbers.includes(dialedNumber)) || s.from === dialedNumber);
-    if (!matchedSession && sessions.size > 0) {
-      matchedSession = [...sessions.values()][sessions.size - 1];
-    }
-    const callerId = dialedNumber || (matchedSession && matchedSession.from) || FROM_NUMBER;
-    let target = (matchedSession && matchedSession.sipUser) || (SIP_USER ? `${SIP_USER}@${REGISTRAR}` : "");
-    if (target.startsWith("sip:")) target = target.slice(4);
+    const live = liveSessions().filter((x) => !AUTH_ID || x.authId === AUTH_ID);
+    let ringing = live.filter((x) => (x.numbers || []).includes(dialedNumber) || x.from === dialedNumber);
+    if (!ringing.length) ringing = live;
+    const targets = [...new Set(ringing.map((x) => x.sipUser).filter(Boolean).map((u) => (u.includes("@") ? u : `${u}@${REGISTRAR}`).replace(/^sips?:/, "")))];
+    if (!targets.length && SHARED_SIP) targets.push(SIP_USER.includes("@") ? SIP_USER : `${SIP_USER}@${REGISTRAR}`);
+    const callerId = dialedNumber || FROM_NUMBER;
+    if (!targets.length) return hangup(`inbound to ${dialedNumber || "(unknown)"} but no agent is signed in`);
+    if (!callerId) return hangup("inbound with no dialled number and no VOBIZ_FROM_NUMBER");
     remember({ callUuid, direction: "Inbound", from, to: callerId, startedAt: Date.now() });
-    log(`  -> inbound from ${from}, bridging to sip:${target} callerId=${callerId}`);
+    log(`  -> inbound from ${from}, ringing ${targets.map((t) => `sip:${t}`).join(", ")} callerId=${callerId}`);
+    const users = targets.map((t) => `    <User>sip:${escXml(t)}</User>`).join("\n");
     return send(res, 200,
-      `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${record}\n  <Dial ${attrs(callerId)}>\n    <User>sip:${escXml(target)}</User>\n  </Dial>\n</Response>`);
+      `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${record}\n  <Dial ${attrs(callerId)}>\n${users}\n  </Dial>\n</Response>`);
   }
 
   // The `action` target of <Dial>. Reporting the result here is what stops the
@@ -474,172 +630,138 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ══ Endpoints the widget calls ═════════════════════════════════════════════
+  // Every one of these except /login and /login-sip needs the session token
+  // /login returned, as `Authorization: Bearer <token>`.
 
-  // The SIP identity the widget registers as.
-  if ((m = p.match(/^\/agent\/([^/]+)$/)) && method === "GET") {
-    const agentId = m[1];
-    if (!sessions.has(agentId)) return send(res, 401, { error: "Log in before requesting SIP credentials" });
-    const s = sessions.get(agentId);
-    const sipUser = (s && s.sipUser) || (SIP_USER ? `${SIP_USER}@${REGISTRAR}` : `${agentId}@${REGISTRAR}`);
-    const sipPassword = (s && s.sipPassword) || SIP_PASSWORD || "vobiz123";
+  const requireSession = (kinds = ["account", "sip"]) => {
+    const s = sessionFrom(req);
+    if (!s) { send(res, 401, { error: "Sign in first" }); return null; }
+    if (!kinds.includes(s.kind)) { send(res, 403, { error: "Sign in with a Vobiz Auth ID and Auth Token for this" }); return null; }
+    return s;
+  };
+
+  // The SIP identity the widget registers as: this agent's own endpoint.
+  // `/agent/<id>` is accepted for older widgets but must match the session.
+  if ((m = p.match(/^\/agent(?:\/([^/]+))?$/)) && method === "GET") {
+    const s = requireSession(["account"]);
+    if (!s) return;
+    if (m[1] && decodeURIComponent(m[1]) !== s.agentId) return send(res, 403, { error: "That is not your agent" });
     return send(res, 200, {
-      displayName: `${agentId} (Vobiz)`,
-      sipUser,
-      sipPassword,
+      displayName: `${s.agentId} (Vobiz)`,
+      sipUser: s.sipUser,
+      sipPassword: s.sipPassword,
       registrarUrl: `wss://${REGISTRAR}:5063/`,
     });
   }
 
-  if ((m = p.match(/^\/session\/([^/]+)$/)) && method === "GET") {
-    const s = sessions.get(m[1]);
-    return send(res, 200, s ? { loggedIn: true, numbers: s.numbers, from: s.from, authId: s.authId } : { loggedIn: false });
+  if ((p === "/session" || p.startsWith("/session/")) && method === "GET") {
+    const s = sessionFrom(req);
+    return send(res, 200, s
+      ? { loggedIn: true, kind: s.kind, agentId: s.agentId, numbers: s.numbers, from: s.from, authId: s.authId, sipUser: s.sipUser }
+      : { loggedIn: false });
   }
 
   if (p === "/login" && method === "POST") {
     const { agentId, authId, authToken } = await readBody(req);
     if (!agentId || !authId || !authToken) return send(res, 400, { error: "agentId, authId and authToken are required" });
+    if (!AGENT_ID_RE.test(agentId)) return send(res, 400, { error: "agentId may contain only letters, digits, - and _" });
+    if (AUTH_ID && authId !== AUTH_ID) {
+      // The caller ID, the application and the balance all belong to the
+      // account in .env; a different account's numbers would be refused.
+      log(`login rejected — got ${authId}, this backend is bound to ${AUTH_ID}`);
+      return send(res, 403, { error: "This backend is configured for a different Vobiz account." });
+    }
 
-    // Validate credentials against VoBiz API or environment
-    let numbers = [];
-    const isEnvMatch = AUTH_ID && AUTH_TOKEN && authId === AUTH_ID && authToken === AUTH_TOKEN;
-
+    // The credentials are checked against Vobiz itself. There is no test or
+    // mock bypass: a session here hands out a SIP password billed to the account.
     const r = await vobiz("GET", "/numbers?per_page=25", null, { authId, authToken });
     if (r.status === 401 || r.status === 403) {
-      if (authId.toLowerCase().includes("test") || authId.toLowerCase().includes("mock")) {
-        log(`development bypass for test credentials: ${authId}`);
-        numbers = ["+91XXXXXXXXXX", "+91XXXXXXXXXX"];
-      } else {
-        log(`login rejected by VoBiz API for ${authId}: ${r.status}`);
-        return send(res, 401, { error: "Invalid Auth ID or Auth Token" });
-      }
+      log(`login rejected by Vobiz for ${authId}: ${r.status}`);
+      return send(res, 401, { error: "Invalid Auth ID or Auth Token" });
+    }
+    if (r.status < 200 || r.status >= 300) {
+      return send(res, 502, { error: `Vobiz returned ${r.status || "no response"} while checking those credentials` });
     }
 
-    if (r.status >= 200 && r.status < 300) {
-      numbers = ((r.body && (r.body.objects || r.body.items)) || []).map((n) => n.e164 || n.number).filter(Boolean);
-    } else if (isEnvMatch && FROM_NUMBER) {
-      numbers = [FROM_NUMBER];
-    } else if (authId.startsWith("MA_") || isEnvMatch) {
-      numbers = FROM_NUMBER ? [FROM_NUMBER] : ["+15550199283"];
+    const numbers = ((r.body && (r.body.objects || r.body.items)) || []).map((n) => toE164(n.e164 || n.number)).filter(Boolean);
+    if (FROM_NUMBER && authId === AUTH_ID && !numbers.includes(FROM_NUMBER)) numbers.unshift(FROM_NUMBER);
+    const selectedFrom = (FROM_NUMBER && numbers.includes(FROM_NUMBER) ? FROM_NUMBER : numbers[0]) || "";
+
+    let sip;
+    if (SHARED_SIP) {
+      sip = { epId: null, sipUser: SIP_USER.includes("@") ? SIP_USER : `${SIP_USER}@${REGISTRAR}`, sipPassword: SIP_PASSWORD };
     } else {
-      return send(res, r.status || 400, { error: (r.body && r.body.error) || `Could not authenticate (${r.status})` });
-    }
-
-    if (FROM_NUMBER && !numbers.includes(FROM_NUMBER)) {
-      numbers.unshift(FROM_NUMBER);
-    }
-    const selectedFrom = numbers[0] || FROM_NUMBER || "";
-
-    let sipUser = SIP_USER ? (SIP_USER.includes("@") ? SIP_USER : `${SIP_USER}@${REGISTRAR}`) : "";
-    let sipPassword = SIP_PASSWORD || "";
-    let epId = null;
-
-    // Auto-resolve or provision a SIP endpoint on the account if not in env
-    if (!sipUser || !sipPassword) {
       try {
-        const epRes = await vobiz("GET", "/Endpoint/?limit=20", null, { authId, authToken });
-        const endpoints = (epRes.body && (epRes.body.objects || epRes.body.items)) || [];
-        const chosenEp = endpoints.find((e) => e.username) || endpoints[0];
-
-        if (chosenEp && chosenEp.username) {
-          epId = chosenEp.endpoint_id || chosenEp.id;
-          const freshPass = `Vobiz${crypto.randomBytes(6).toString("hex")}9!`;
-          if (epId) {
-            await vobiz("POST", `/Endpoint/${encodeURIComponent(epId)}/`, { password: freshPass }, { authId, authToken });
-          }
-          sipUser = chosenEp.username.includes("@") ? chosenEp.username : `${chosenEp.username}@${REGISTRAR}`;
-          sipPassword = freshPass;
-          log(`auto-configured existing SIP endpoint: ${chosenEp.username} for ${authId}`);
-        } else {
-          const cleanSuffix = Date.now().toString().slice(-6);
-          const freshPass = `Vobiz${crypto.randomBytes(6).toString("hex")}9!`;
-          const createRes = await vobiz("POST", "/Endpoint/", {
-            username: `hsagent${cleanSuffix}`,
-            password: freshPass,
-            alias: "HubSpot Softphone",
-          }, { authId, authToken });
-
-          epId = createRes.body && (createRes.body.endpoint_id || createRes.body.id);
-          const newUsername = (createRes.body && createRes.body.username) || `hsagent${cleanSuffix}`;
-          sipUser = newUsername.includes("@") ? newUsername : `${newUsername}@${REGISTRAR}`;
-          sipPassword = freshPass;
-          log(`auto-created new SIP endpoint: ${newUsername} for ${authId}`);
-        }
-      } catch (epErr) {
-        log(`⚠ endpoint resolution error for ${authId}:`, epErr.message);
+        sip = await ensureAgentEndpoint({ authId, authToken }, agentId);
+      } catch (err) {
+        log(`⚠ could not provision a SIP endpoint for ${agentId}:`, err.message);
+        return send(res, 502, { error: `Could not set up a SIP endpoint for this agent: ${err.message}` });
       }
     }
 
-    if (!sipUser) sipUser = `${agentId}@${REGISTRAR}`;
-    if (!sipPassword) sipPassword = "vobiz123";
-
-    // Auto-bind application, endpoint and number to current tunnel answer_url
-    if (epId || selectedFrom) {
-      ensureHubspotAppAndRouting(authId, authToken, epId, selectedFrom).catch((e) => {
+    if (sip.epId || selectedFrom) {
+      ensureHubspotAppAndRouting(authId, authToken, sip.epId, selectedFrom).catch((e) => {
         log(`⚠ ensureHubspotAppAndRouting failed:`, e.message);
       });
     }
 
-    sessions.set(agentId, {
-      authId,
-      authToken,
-      numbers,
-      from: selectedFrom,
-      sipUser,
-      sipPassword,
-      epId,
-    });
-
-    log(`login ok — ${agentId} (${authId}), ${numbers.length} number(s), sipUser: ${sipUser}, from: ${selectedFrom}`);
-    return send(res, 200, { numbers, selected: selectedFrom, authId });
+    const token = openSession({ kind: "account", agentId, authId, authToken, numbers, from: selectedFrom, ...sip });
+    log(`login ok — ${agentId} (${authId}), ${numbers.length} number(s), sipUser: ${sip.sipUser}, from: ${selectedFrom}`);
+    return send(res, 200, { token, agentId, numbers, selected: selectedFrom, authId, sipUser: sip.sipUser });
   }
 
+  // SIP direct: the browser registers with endpoint credentials the agent typed
+  // in. The backend never sees the password. It records which endpoint is this
+  // agent's, so outbound gets the right caller ID and inbound rings it — but
+  // only after checking, with the account's own credentials, that the endpoint
+  // and the caller ID really belong to the account.
   if (p === "/login-sip" && method === "POST") {
-    const { agentId, sipUser, sipPassword, callerId } = await readBody(req);
-    const id = agentId || "test-agent";
-    const cleanUser = sipUser ? (sipUser.includes("@") ? sipUser.split("@")[0] : sipUser) : (SIP_USER || id);
-    sessions.set(id, {
-      authId: cleanUser,
-      sipUser: `${cleanUser}@${REGISTRAR}`,
-      sipPassword: sipPassword || SIP_PASSWORD || "vobiz123",
-      from: callerId || FROM_NUMBER || "",
-      numbers: callerId ? [callerId] : (FROM_NUMBER ? [FROM_NUMBER] : []),
-      isSipDirect: true,
+    const { agentId, sipUser, callerId } = await readBody(req);
+    if (!AUTH_ID || !AUTH_TOKEN) return send(res, 400, { error: "SIP direct sign-in needs VOBIZ_AUTH_ID and VOBIZ_AUTH_TOKEN on the backend" });
+    if (!agentId || !AGENT_ID_RE.test(agentId)) return send(res, 400, { error: "A valid agentId is required" });
+    const username = sipUserPart(sipUser);
+    const from = toE164(callerId);
+    if (!username || !from) return send(res, 400, { error: "sipUser and callerId are required" });
+
+    const eps = await vobiz("GET", "/Endpoint/?limit=100");
+    const ep = ((eps.body && (eps.body.objects || eps.body.items)) || []).find((e) => e.username === username);
+    if (!ep) return send(res, 403, { error: "That SIP username is not an endpoint on this account" });
+    const nums = await vobiz("GET", "/numbers?per_page=100");
+    const owned = ((nums.body && (nums.body.objects || nums.body.items)) || []).map((n) => toE164(n.e164 || n.number));
+    if (!owned.includes(from)) return send(res, 403, { error: "That caller ID is not a number on this account" });
+
+    const token = openSession({
+      kind: "sip", agentId, authId: AUTH_ID, sipUser: `${username}@${REGISTRAR}`,
+      epId: ep.endpoint_id || ep.id || null, numbers: [from], from,
     });
-    log(`sip direct login ok — ${id} (${cleanUser}), callerId: ${callerId}`);
-    return send(res, 200, { ok: true, sipUser: `${cleanUser}@${REGISTRAR}`, from: callerId });
+    log(`sip direct login ok — ${agentId} (${username}), callerId: ${from}`);
+    return send(res, 200, { ok: true, token, sipUser: `${username}@${REGISTRAR}`, from });
   }
 
   if (p === "/logout" && method === "POST") {
-    const { agentId } = await readBody(req);
-    if (agentId && sessions.has(agentId)) {
-      sessions.delete(agentId);
-      log(`logout ok — session cleared for ${agentId}`);
+    const s = sessionFrom(req);
+    if (s) {
+      dropSession(s.token);
+      log(`logout ok — session cleared for ${s.agentId}`);
     }
     return send(res, 200, { ok: true });
   }
 
   if (p === "/select-number" && method === "POST") {
-    const { agentId, number } = await readBody(req);
-    const s = sessions.get(agentId);
-    if (!s) return send(res, 401, { error: "Log in first" });
+    const s = requireSession(["account"]);
+    if (!s) return;
+    const { number } = await readBody(req);
     if (!s.numbers.includes(number)) return send(res, 400, { error: "That number is not on this account" });
-    s.from = number;
-    log(`caller ID for ${agentId} -> ${number}`);
-
-    // Auto-attach this chosen number to the application
-    if (s.authId && s.authToken) {
-      ensureHubspotAppAndRouting(s.authId, s.authToken, s.epId, number).catch((err) => {
-        log(`⚠ could not attach number ${number} on select:`, err.message);
-      });
-    }
-
+    s.ref.from = number;
+    log(`caller ID for ${s.agentId} -> ${number}`);
+    ensureHubspotAppAndRouting(s.authId, s.authToken, s.epId, number).catch((err) => {
+      log(`⚠ could not attach number ${number} on select:`, err.message);
+    });
     return send(res, 200, { selected: number });
   }
 
-  // Kept only as a server-originated fallback (ringing an agent's mobile, say).
-  // The widget does NOT use this for outbound any more: it sends the INVITE
-  // itself, because the REST API cannot originate to a registered WebRTC
-  // endpoint.
+  // The widget originates outbound calls itself: the REST API cannot originate
+  // to a registered WebRTC endpoint.
   if (p === "/start-call" && method === "POST") {
     return send(res, 410, {
       error: "The widget originates outbound calls itself over SIP. The browser is the A leg; see README.",
@@ -647,158 +769,89 @@ const server = http.createServer(async (req, res) => {
   }
 
   if ((m = p.match(/^\/call-status\/([^/]+)$/)) && method === "GET") {
-    const r = await vobiz("GET", `/Call/${encodeURIComponent(m[1])}/?status=live`);
+    const s = requireSession(["account"]);
+    if (!s) return;
+    const r = await vobiz("GET", `/Call/${encodeURIComponent(m[1])}/?status=live`, null, { authId: s.authId, authToken: s.authToken });
     return send(res, 200, { active: r.status === 200 });
   }
 
   /**
-   * Binds the SIP endpoint to a Vobiz application pointing at this backend's
-   * /answer, and attaches the selected number for inbound.
+   * Points a Vobiz application at this backend's /answer, binds this agent's
+   * endpoint to it, and attaches the selected number for inbound.
    */
   if (p === "/setup-inbound" && method === "POST") {
-    const { agentId } = await readBody(req);
-    const s = sessions.get(agentId);
-    if (!s) return send(res, 401, { error: "Log in first" });
+    const s = requireSession(["account"]);
+    if (!s) return;
     const base = publicBase();
     if (!base.startsWith("https://")) return send(res, 500, { error: "PUBLIC_BASE must be a public https URL Vobiz can reach" });
-
-    const answerUrl = `${base}/answer`;
-    const apps = await vobiz("GET", "/Application/?limit=50", null, { authId: s.authId, authToken: s.authToken });
-    let app = ((apps.body && apps.body.objects) || []).find((a) => a.answer_url === answerUrl);
-    if (!app) {
-      const created = await vobiz("POST", "/Application/", {
-        app_name: "HubSpot Calling (Vobiz)", answer_url: answerUrl, answer_method: "POST",
-        hangup_url: answerUrl, hangup_method: "POST",
-      }, { authId: s.authId, authToken: s.authToken });
-      if (created.status >= 400) return send(res, created.status, { error: `Could not create the Vobiz application: ${JSON.stringify(created.body).slice(0, 200)}` });
-      app = created.body;
-    }
-    const appId = app.app_id || app.id;
-
-    const eps = await vobiz("GET", "/Endpoint/?limit=100", null, { authId: s.authId, authToken: s.authToken });
-    const targetUser = SIP_USER || s.sipUser || agentId;
-    const ep = ((eps.body && eps.body.objects) || []).find((e) => e.username === targetUser || e.username === SIP_USER);
-    if (ep) {
-      const bind = await vobiz("POST", `/Endpoint/${encodeURIComponent(ep.endpoint_id || ep.id)}/`, { app_id: appId }, { authId: s.authId, authToken: s.authToken });
-      if (bind.status >= 400) log(`  ⚠ could not bind endpoint ${targetUser}: ${bind.status}`);
-    }
-
-    let numberAttached = null;
-    if (s.from) {
-      const att = await vobiz("POST", `/numbers/${encodeURIComponent(s.from)}/application`, { application_id: String(appId) }, { authId: s.authId, authToken: s.authToken });
-      if (att.status < 400) numberAttached = s.from;
-      else log(`  ⚠ could not attach ${s.from} to application: ${att.status}`);
-    }
-
-    log(`setup ok — number ${numberAttached || s.from} bound to app ${appId}`);
-    return send(res, 200, { ok: true, appId, answerUrl, number: numberAttached || s.from, sipUser: targetUser });
+    const appId = await ensureHubspotAppAndRouting(s.authId, s.authToken, s.epId, s.from);
+    if (!appId) return send(res, 502, { error: "Could not create or update the Vobiz application" });
+    log(`setup ok — number ${s.from} bound to app ${appId}`);
+    return send(res, 200, { ok: true, appId, answerUrl: `${base}/answer`, number: s.from, sipUser: s.sipUser });
   }
 
   /**
-   * Create a dedicated VoBiz Application & SIP Endpoint for HubSpot,
-   * link +91XXXXXXXXXX, and configure answer_url and hangup_url.
+   * Create a dedicated Vobiz application for HubSpot, bind this agent's
+   * endpoint to it, and attach a number the account owns.
    */
   if (p === "/provision-hubspot-dedicated" && method === "POST") {
-    const { agentId, tunnelUrl, number } = await readBody(req);
-    const targetNumber = number || "+91XXXXXXXXXX";
-    const s = sessions.get(agentId || "test-agent");
-    if (!s) return send(res, 401, { error: "Please log in first with your Auth ID and Auth Token" });
-
-    if (tunnelUrl) {
-      fs.writeFileSync(TUNNEL_URL_FILE, tunnelUrl.trim().replace(/\/+$/, ""));
-      log(`publicBase updated via tunnelUrl: ${tunnelUrl}`);
+    const s = requireSession(["account"]);
+    if (!s) return;
+    const { tunnelUrl, number } = await readBody(req);
+    const targetNumber = toE164(number);
+    if (!targetNumber || !s.numbers.includes(targetNumber)) {
+      return send(res, 400, { error: "Choose a number that is on this Vobiz account" });
     }
-
+    if (tunnelUrl) {
+      let u;
+      try { u = new URL(String(tunnelUrl).trim()); } catch { /* invalid */ }
+      if (!u || u.protocol !== "https:" || u.pathname.replace(/\/+$/, "") !== "") {
+        return send(res, 400, { error: "The tunnel URL must be a bare https origin, e.g. https://your-host.example.com" });
+      }
+      fs.writeFileSync(TUNNEL_URL_FILE, u.origin);
+      log(`publicBase updated by ${s.agentId}: ${u.origin}`);
+    }
     const base = publicBase();
-    if (!base || !base.startsWith("https://")) {
-      return send(res, 400, {
-        error: "PUBLIC_BASE is not set. Please provide your public HTTPS tunnel URL (e.g. ngrok or cloudflared URL: https://...)",
-      });
+    if (!base.startsWith("https://")) {
+      return send(res, 400, { error: "PUBLIC_BASE is not set. Provide your public HTTPS tunnel URL." });
     }
 
     const answerUrl = `${base}/answer`;
-    log(`[HubSpot Provisioning] Creating dedicated Application with answer_url: ${answerUrl}...`);
-
-    // 1. Create a brand new dedicated application
     const appRes = await vobiz("POST", "/Application/", {
-      app_name: `HubSpot Calling (Vobiz Dedicated)`,
-      answer_url: answerUrl,
-      answer_method: "POST",
-      hangup_url: answerUrl,
-      hangup_method: "POST",
+      app_name: "HubSpot Calling (Vobiz Dedicated)",
+      answer_url: answerUrl, answer_method: "POST",
+      hangup_url: answerUrl, hangup_method: "POST",
       default_number: targetNumber,
     }, { authId: s.authId, authToken: s.authToken });
-
-    if (appRes.status >= 400) {
-      log(`[HubSpot Provisioning] Application creation failed:`, appRes.body);
-      return send(res, appRes.status, { error: `Could not create VoBiz Application: ${JSON.stringify(appRes.body)}` });
+    const appId = appRes.body && (appRes.body.app_id || appRes.body.id);
+    if (appRes.status >= 400 || !appId) {
+      log(`[provision] application creation failed:`, appRes.status);
+      return send(res, appRes.status >= 400 ? appRes.status : 502, { error: "Could not create the Vobiz application" });
     }
-
-    const app = appRes.body;
-    const appId = app.app_id || app.id;
-    log(`[HubSpot Provisioning] Created Application ID: ${appId}`);
-
-    // 2. Create a brand new dedicated endpoint bound to this app
-    const freshPass = "VobizHubSpot2026!";
-    const epSuffix = Date.now().toString().slice(-6);
-    const epRes = await vobiz("POST", "/Endpoint/", {
-      username: `hsagent${epSuffix}`,
-      password: freshPass,
-      alias: "HubSpot CRM Dedicated Softphone",
-      app_id: appId,
-    }, { authId: s.authId, authToken: s.authToken });
-
-    const epUsername = (epRes.body && epRes.body.username) || `hsagent${epSuffix}`;
-    const epId = epRes.body && (epRes.body.endpoint_id || epRes.body.id);
-    log(`[HubSpot Provisioning] Created Endpoint: ${epUsername} (ID: ${epId})`);
-
-    // Ensure endpoint is bound to application
-    if (epId) {
-      await vobiz("POST", `/Endpoint/${encodeURIComponent(epId)}/`, { app_id: appId }, { authId: s.authId, authToken: s.authToken });
+    if (s.epId) {
+      await vobiz("POST", `/Endpoint/${encodeURIComponent(s.epId)}/`, { app_id: appId }, { authId: s.authId, authToken: s.authToken });
     }
-
-    // 3. Link specified number to this Application
-    log(`[HubSpot Provisioning] Attaching number ${targetNumber} to Application ${appId}...`);
     const numRes = await vobiz("POST", `/numbers/${encodeURIComponent(targetNumber)}/application`, {
       application_id: String(appId),
     }, { authId: s.authId, authToken: s.authToken });
-
-    log(`[HubSpot Provisioning] Number attachment result: status ${numRes.status}`);
-
-    // 4. Update session
-    s.from = targetNumber;
-    s.sipUser = `${epUsername}@${REGISTRAR}`;
-    s.sipPassword = freshPass;
-    if (!s.numbers.includes(targetNumber)) {
-      s.numbers.unshift(targetNumber);
-    }
-
+    log(`[provision] app ${appId}, endpoint ${s.sipUser}, number ${targetNumber} (attach ${numRes.status})`);
+    s.ref.from = targetNumber;
     return send(res, 200, {
-      ok: true,
-      appId,
-      appName: app.app_name,
-      answerUrl,
-      hangupUrl: answerUrl,
-      number: targetNumber,
-      sipUser: s.sipUser,
-      sipPassword: freshPass,
+      ok: true, appId, appName: (appRes.body && appRes.body.app_name) || "HubSpot Calling (Vobiz Dedicated)",
+      answerUrl, hangupUrl: answerUrl, number: targetNumber, sipUser: s.sipUser,
     });
   }
 
-  if ((m = p.match(/^\/recordings\/([^/]+)$/)) && method === "GET") {
-    const s = sessions.get(m[1]);
-    if (!s) return send(res, 401, { error: "Log in to see recordings" });
+  if ((p === "/recordings" || p.startsWith("/recordings/")) && method === "GET") {
+    const s = requireSession(["account"]);
+    if (!s) return;
     const limit = Math.min(Number(url.searchParams.get("limit") || 15), 50);
     const r = await vobiz("GET", `/Recording/?limit=${limit}`, null, { authId: s.authId, authToken: s.authToken });
     const rawList = (r.body && (r.body.objects || r.body.items)) || [];
     const objects = rawList.map((o) => {
       const audioUrl = o.recording_url || o.url || "";
       if (o.recording_id) {
-        recordingMeta.set(o.recording_id, {
-          authId: s.authId,
-          authToken: s.authToken,
-          url: audioUrl,
-        });
+        recordingMeta.set(o.recording_id, { authId: s.authId, authToken: s.authToken, url: audioUrl });
       }
       return {
         recording_id: o.recording_id,
@@ -806,15 +859,14 @@ const server = http.createServer(async (req, res) => {
         rounded_recording_duration: o.rounded_recording_duration,
         call_uuid: o.call_uuid,
         playUrl: signRecordingUrl(o.recording_id),
-        recording_url: audioUrl,
       };
     });
     return send(res, 200, { objects });
   }
 
-  if ((m = p.match(/^\/cdrs\/([^/]+)$/)) && method === "GET") {
-    const s = sessions.get(m[1]);
-    if (!s) return send(res, 401, { error: "Log in to see call history" });
+  if ((p === "/cdrs" || p.startsWith("/cdrs/")) && method === "GET") {
+    const s = requireSession(["account"]);
+    if (!s) return;
     const limit = Math.min(Number(url.searchParams.get("limit") || 15), 50);
     const r = await vobiz("GET", `/Call/?limit=${limit}`, null, { authId: s.authId, authToken: s.authToken });
     return send(res, 200, { objects: (r.body && r.body.objects) || [] });
@@ -858,19 +910,16 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const isVobizApi = src.includes("api.vobiz.ai");
+      // Account credentials go to Vobiz's own hosts and nowhere else. The
+      // recording URL can arrive in an unauthenticated webhook, so a bucket
+      // host that answers 401 must not get a retry with the Auth Token on it.
       const headers = {};
-      if (isVobizApi && auth.authId && auth.authToken) {
+      if (/(^|\.)vobiz\.ai$/i.test(new URL(src).hostname) && auth.authId && auth.authToken) {
         headers["X-Auth-ID"] = auth.authId;
         headers["X-Auth-Token"] = auth.authToken;
       }
 
-      let audio = await fetch(src, { headers });
-      if (!audio.ok && (audio.status === 401 || audio.status === 403) && !headers["X-Auth-ID"] && auth.authId && auth.authToken) {
-        headers["X-Auth-ID"] = auth.authId;
-        headers["X-Auth-Token"] = auth.authToken;
-        audio = await fetch(src, { headers });
-      }
+      const audio = await fetch(src, { headers, redirect: "error" });
 
       if (!audio.ok) {
         log(`  ⚠ audio fetch failed with status ${audio.status} for ${src}`);
@@ -947,10 +996,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === "/health") {
+    // No account id or SIP username here: /health is unauthenticated.
     return send(res, 200, {
-      ok: true, account: AUTH_ID || null, from: FROM_NUMBER || null,
-      sip: SIP_USER ? `sip:${SIP_USER}@${REGISTRAR}` : null,
-      publicBase: publicBase() || null, sessions: sessions.size, recentCalls: recent.length,
+      ok: true,
+      sipMode: SHARED_SIP ? "shared-endpoint" : "per-agent",
+      callerIdConfigured: Boolean(FROM_NUMBER),
+      publicBase: publicBase() || null, sessions: liveSessions().length, recentCalls: recent.length,
     });
   }
 
@@ -962,6 +1013,6 @@ server.listen(PORT, () => {
   console.log(`Vobiz HubSpot calling backend on http://localhost:${PORT}`);
   console.log(`  account     ${AUTH_ID || "(unset)"}`);
   console.log(`  caller ID   ${FROM_NUMBER || "(unset)"}`);
-  console.log(`  registers   sip:${SIP_USER || "(unset)"}@${REGISTRAR}`);
+  console.log(`  SIP         ${SHARED_SIP ? `shared endpoint sip:${SIP_USER}` : "one endpoint per agent"}`);
   console.log(`  public base ${publicBase() || "(NOT SET — Vobiz cannot reach the answer URL, calls will die)"}`);
 });
