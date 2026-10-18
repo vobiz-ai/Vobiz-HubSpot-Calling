@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardcoded SIP passwords (`vobiz123`, and a fixed one in provisioning).
 - Signing in rotated the password of the account's first endpoint, whatever
   else used it, and could rewrite the answer URL of an unrelated application.
-- CORS allowed any `*.trycloudflare.com` / `*.ngrok-free.app` origin.
+- CORS allowed any Cloudflare or ngrok quick-tunnel origin.
 - The Vobiz Auth Token and SIP password were saved in `localStorage`.
 - Calls were never written to the HubSpot timeline: `callCompleted` was only
   sent from the developer panel.
