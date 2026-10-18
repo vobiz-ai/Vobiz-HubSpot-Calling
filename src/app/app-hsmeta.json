@@ -2,8 +2,8 @@
   "uid": "vobiz_calling_integration_app",
   "type": "app",
   "config": {
-    "description": "VoBiz Calling HubSpot CRM Integration",
-    "name": "VoBiz Calling Project App",
+    "description": "Vobiz Calling HubSpot CRM Integration",
+    "name": "Vobiz Calling Project App",
     "distribution": "private",
     "auth": {
       "type": "oauth",

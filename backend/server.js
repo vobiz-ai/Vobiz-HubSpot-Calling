@@ -395,7 +395,7 @@ function serveWidgetAsset(res, rel) {
 async function ensureHubspotAppAndRouting(authId, authToken, epId, fromNumber) {
   const base = publicBase();
   if (!base || !base.startsWith("https://")) {
-    log("  ⚠ cannot configure VoBiz Application: PUBLIC_BASE is not an https URL");
+    log("  ⚠ cannot configure Vobiz Application: PUBLIC_BASE is not an https URL");
     return null;
   }
   const answerUrl = `${base}/answer`;
@@ -419,7 +419,7 @@ async function ensureHubspotAppAndRouting(authId, authToken, epId, fromNumber) {
         hangup_method: "POST",
         default_number: fromNumber || "",
       }, { authId, authToken });
-      log(`synchronized existing VoBiz Application ${appId} with answerUrl: ${answerUrl}`);
+      log(`synchronized existing Vobiz Application ${appId} with answerUrl: ${answerUrl}`);
     } else {
       const created = await vobiz("POST", "/Application/", {
         app_name: "HubSpot Calling (Vobiz Dedicated)",
@@ -431,7 +431,7 @@ async function ensureHubspotAppAndRouting(authId, authToken, epId, fromNumber) {
       }, { authId, authToken });
       app = created.body;
       appId = app && (app.app_id || app.id);
-      log(`created VoBiz Application: ${appId} with answerUrl: ${answerUrl}`);
+      log(`created Vobiz Application: ${appId} with answerUrl: ${answerUrl}`);
     }
     if (!appId) return null;
 
@@ -888,7 +888,7 @@ const server = http.createServer(async (req, res) => {
     let src = auth.url;
 
     if (!src) {
-      log(`fetching recording metadata from VoBiz for ${recordingId} with authId: ${auth.authId || "(none)"}...`);
+      log(`fetching recording metadata from Vobiz for ${recordingId} with authId: ${auth.authId || "(none)"}...`);
       const meta = await vobiz("GET", `/Recording/${encodeURIComponent(recordingId)}/`, null, {
         authId: auth.authId,
         authToken: auth.authToken,

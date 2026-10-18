@@ -42,7 +42,7 @@ function scanDirectory(dir) {
   return violations;
 }
 
-console.log("🔍 Scanning VoBiz HubSpot repository for hardcoded credentials...");
+console.log("🔍 Scanning Vobiz HubSpot repository for hardcoded credentials...");
 const issues = scanDirectory(rootDir);
 
 if (issues === 0) {

@@ -240,11 +240,11 @@ export async function ensureMicPermission() {
       throw new Error("navigator.mediaDevices is unavailable in this frame");
     }
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    console.log("[VoBiz SIP] Microphone ready — permission granted");
+    console.log("[Vobiz SIP] Microphone ready — permission granted");
     return micStream;
   } catch (err) {
     micStream = null;
-    console.error("[VoBiz SIP] Microphone unavailable:", err && err.name, err && err.message);
+    console.error("[Vobiz SIP] Microphone unavailable:", err && err.name, err && err.message);
     setCallStatus("Microphone blocked — allow mic access in your browser.");
     return null;
   }
@@ -297,7 +297,7 @@ function refreshDialState() {
   if (hint) {
     if (ready) hint.textContent = "";
     else if (!accountReady && !sipRegistered) hint.textContent = "Log in and wait for the panel to register before calling.";
-    else if (!accountReady) hint.textContent = "Log in with your VoBiz credentials to enable calling.";
+    else if (!accountReady) hint.textContent = "Log in with your Vobiz credentials to enable calling.";
     else hint.textContent = "Connecting SIP registration…";
   }
 }
@@ -310,7 +310,7 @@ function attachRemoteAudio(session) {
     if (!pc) return;
     pc.addEventListener("track", event => {
       audioEl.srcObject = event.streams[0];
-      audioEl.play().catch(err => console.warn("[VoBiz] audio autoplay blocked:", err));
+      audioEl.play().catch(err => console.warn("[Vobiz] audio autoplay blocked:", err));
     });
   };
   session.on("peerconnection", e => bindTrack(e.peerconnection));
@@ -339,7 +339,7 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
     user_agent: "VobizHubSpotCalling/2.0.0",
   });
 
-  vobizUA.on("connected", () => console.log("[VoBiz SIP] WebSocket connected to registrar"));
+  vobizUA.on("connected", () => console.log("[Vobiz SIP] WebSocket connected to registrar"));
   vobizUA.on("disconnected", () => {
     setSipRegistered(false);
     setStatus("Disconnected from registrar");
@@ -368,14 +368,14 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
     const fromNumber = callerNumber.startsWith("+") ? callerNumber : `+${callerNumber}`;
 
     const numberSelect = document.getElementById("vobiz-number-select");
-    const ownNumber = (numberSelect && numberSelect.value) || state.fromNumber || "VoBiz Line";
+    const ownNumber = (numberSelect && numberSelect.value) || state.fromNumber || "Vobiz Line";
 
     state.externalCallId = uuidv4();
     state.engagementId = 0;
     state.fromNumber = fromNumber;
     pendingIncomingSession = data.session;
 
-    console.log("[VoBiz SIP] Real inbound call received from", fromNumber, "to", ownNumber);
+    console.log("[Vobiz SIP] Real inbound call received from", fromNumber, "to", ownNumber);
 
     // 1. Notify HubSpot CTI
     notifyHubSpot(() => {
@@ -394,7 +394,7 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
     // 3. Desktop Notification if granted
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       try {
-        new Notification("Incoming VoBiz Call", {
+        new Notification("Incoming Vobiz Call", {
           body: `Call from ${fromNumber} to ${ownNumber}`,
           icon: "styles/images/icon.svg",
         });
@@ -439,7 +439,7 @@ export async function initVobizSip() {
     }
     agent = await res.json();
   } catch (err) {
-    console.error("[VoBiz] Could not reach calling backend:", err);
+    console.error("[Vobiz] Could not reach calling backend:", err);
     setStatus("Cannot reach the calling backend");
     setSipRegistered(false);
     return;
@@ -473,7 +473,7 @@ function startRingtone() {
     beep();
     ringTimer = setInterval(beep, 2000);
   } catch (err) {
-    console.warn("[VoBiz] Ringtone error:", err);
+    console.warn("[Vobiz] Ringtone error:", err);
   }
 }
 
@@ -568,7 +568,7 @@ export async function answerIncomingCall() {
       completeCall();
     });
   } catch (err) {
-    console.error("[VoBiz] Error answering call:", err);
+    console.error("[Vobiz] Error answering call:", err);
     setStatus(`Could not answer call: ${err.message}`);
   }
 }
@@ -597,7 +597,7 @@ export function declineIncomingCall() {
   setTimeout(() => setStatus("Ready"), 3000);
 }
 
-/** === Dual Mode Switching (VoBiz Account vs SIP Direct) === */
+/** === Dual Mode Switching (Vobiz Account vs SIP Direct) === */
 export function setAuthMode(mode) {
   authMode = mode === "sip" ? "sip" : "account";
   writeStore(AUTH_MODE_KEY, authMode);
@@ -706,7 +706,7 @@ export async function sipDirectConnect() {
   setLoginStatus("Connected via SIP direct.");
 }
 
-/** === VoBiz Account Authentication (Auth ID / Auth Token) === */
+/** === Vobiz Account Authentication (Auth ID / Auth Token) === */
 export async function vobizLogin() {
   const authIdInput = document.getElementById("vobiz-auth-id");
   const authTokenInput = document.getElementById("vobiz-auth-token");
@@ -750,7 +750,7 @@ export async function vobizLogin() {
 
     loadRecordings();
   } catch (err) {
-    console.error("[VoBiz] Login failed:", err);
+    console.error("[Vobiz] Login failed:", err);
     setLoginStatus(`Login failed: ${err.message}`, true);
     setDialEnabled(false);
   }
@@ -862,7 +862,7 @@ export async function vobizSelectNumber() {
     if (userFrom) userFrom.textContent = `Caller ID: ${data.selected}`;
     setLoginStatus(`Caller ID set to ${data.selected}`);
   } catch (err) {
-    console.error("[VoBiz] Switch number failed:", err);
+    console.error("[Vobiz] Switch number failed:", err);
     setLoginStatus(`Could not switch number: ${err.message}`, true);
   }
 }
@@ -903,7 +903,7 @@ export async function placeCall(number) {
   });
 
   const target = `sip:${String(number).replace(/[^\d+]/g, "")}@${VOBIZ_SIP_DOMAIN}`;
-  console.log("[VoBiz] Sending INVITE to", target);
+  console.log("[Vobiz] Sending INVITE to", target);
 
   try {
     const session = vobizUA.call(target, {
@@ -956,7 +956,7 @@ export async function placeCall(number) {
       setTimeout(() => setCallStatus(""), 4000);
     });
   } catch (err) {
-    console.error("[VoBiz] Could not place call:", err);
+    console.error("[Vobiz] Could not place call:", err);
     stopCallTimer();
     setCallStatus(`Could not place call: ${err.message}`);
     setHangupVisible(false);
@@ -973,7 +973,7 @@ export function hangUp() {
     try {
       currentRTCSession.terminate();
     } catch (err) {
-      console.warn("[VoBiz] Hangup failed:", err);
+      console.warn("[Vobiz] Hangup failed:", err);
     }
   }
 }
@@ -1001,7 +1001,7 @@ export async function setupInboundCalling() {
       statusEl.className = "hint is-ok";
     }
   } catch (err) {
-    console.error("[VoBiz] Inbound setup failed:", err);
+    console.error("[Vobiz] Inbound setup failed:", err);
     if (statusEl) {
       statusEl.textContent = `Setup failed: ${err.message}`;
       statusEl.className = "hint is-error";
@@ -1040,7 +1040,7 @@ export async function provisionDedicatedHubSpotApp() {
   }
 
   if (statusEl) {
-    statusEl.textContent = "Creating VoBiz Application, Endpoint, and linking number…";
+    statusEl.textContent = "Creating Vobiz Application, Endpoint, and linking number…";
     statusEl.className = "hint";
     statusEl.style.display = "block";
   }
@@ -1065,7 +1065,7 @@ export async function provisionDedicatedHubSpotApp() {
     setDialEnabled(true);
     initVobizSip();
   } catch (err) {
-    console.error("[VoBiz] Provisioning failed:", err);
+    console.error("[Vobiz] Provisioning failed:", err);
     if (statusEl) {
       statusEl.textContent = `Provisioning error: ${err.message}`;
       statusEl.className = "hint is-error";
@@ -1169,7 +1169,7 @@ function playRecording(recordingId, playUrl, buttonEl) {
   };
 
   audioEl.onerror = () => {
-    console.error("[VoBiz] audio playback error for:", targetSrc, audioEl.error);
+    console.error("[Vobiz] audio playback error for:", targetSrc, audioEl.error);
     if (buttonEl) buttonEl.textContent = "⚠ Failed";
     setTimeout(() => {
       if (buttonEl && buttonEl.textContent === "⚠ Failed") buttonEl.textContent = "▶ Play";
@@ -1177,7 +1177,7 @@ function playRecording(recordingId, playUrl, buttonEl) {
   };
 
   audioEl.play().catch(err => {
-    console.warn("[VoBiz] playback blocked:", err);
+    console.warn("[Vobiz] playback blocked:", err);
     if (buttonEl) buttonEl.textContent = "▶ Play";
   });
 }
@@ -1289,7 +1289,7 @@ function setupEventListeners() {
   // Test simulation for inbound call popup
   if (testIncomingBtn) {
     testIncomingBtn.addEventListener("click", () => {
-      showIncomingCallPopup("+1 (415) 555-0199", "Your VoBiz Line");
+      showIncomingCallPopup("+1 (415) 555-0199", "Your Vobiz Line");
     });
   }
 
@@ -1348,7 +1348,7 @@ if (typeof window !== "undefined") {
       try {
         cti.initialized({ isLoggedIn: false });
       } catch (err) {
-        console.warn("[VoBiz] Auto-initialize note:", err);
+        console.warn("[Vobiz] Auto-initialize note:", err);
       }
     }
   });
