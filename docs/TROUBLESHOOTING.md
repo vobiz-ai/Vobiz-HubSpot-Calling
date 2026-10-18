@@ -65,7 +65,7 @@ The widget fetched `/agent/{id}` and the SIP stack did not come up.
 | What you see | Cause |
 | --- | --- |
 | `401` on `/agent/…` | Not signed in. SIP credentials are session-gated |
-| "Registration failed" | Wrong `VOBIZ_SIP_USER` — almost always the username you *submitted* rather than the one Vobiz *stored* |
+| "Registration failed" | Account sign-in: sign in again (it sets a fresh password). SIP direct: the typed username is almost always the one you *submitted* rather than the one Vobiz *stored*; copy it from Console → Endpoints |
 | Stuck on "Connecting…" | Backend unreachable, or it crashed — check the log |
 | No microphone | The iframe was denied mic permission; the call will ring and connect to silence |
 
@@ -92,7 +92,7 @@ disagrees with the UI often enough to be worth checking first.
 
 Vobiz never fetched the answer URL, so it had no instructions.
 
-- The SIP endpoint is not bound to an application → `POST /setup-inbound`
+- The SIP endpoint is not bound to an application → sign in again (account mode binds it; check the log for `bound endpoint`), or bind it yourself (SIP direct)
 - `PUBLIC_BASE` is stale — the tunnel restarted and got a new hostname
 - The tunnel is down
 

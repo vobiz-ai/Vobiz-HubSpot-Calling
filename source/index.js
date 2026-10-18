@@ -56,6 +56,10 @@ const AUTH_MODE_KEY = "vobiz.authMode";
 const SIP_CREDS_KEY = "vobiz.sipDirect";
 const ACCOUNT_CREDS_KEY = "vobiz.accountCreds";
 let authMode = "account";
+const ACCOUNT_ONLY = "Sign in with your Vobiz account to use this.";
+// [{ e164, applicationId }] for the signed-in account, from the backend's
+// read of the account's number list. Shows which app a number would move from.
+let numberDetails = [];
 
 export const state = {
   externalCallId: "",
@@ -736,6 +740,7 @@ export async function vobizLogin() {
     if (authTokenInput) authTokenInput.value = "";
 
     // Update UI
+    numberDetails = data.numberDetails || [];
     showLoggedInState(data.authId || authId, data.selected, data.numbers);
     setLoginStatus("Signed in successfully.");
 
@@ -802,6 +807,31 @@ function showLoggedInState(authId, selectedNumber, numbers) {
   if (authMode !== "sip") {
     renderNumberOptions(numbers, selectedNumber);
   }
+  renderInboundOptions(authMode === "sip" ? [] : numbers, selectedNumber);
+}
+
+// "Enable inbound calls" offers the signed-in account's own numbers, as the
+// backend returned them. In SIP direct mode there is no account API, so the
+// step only says how to get it.
+function renderInboundOptions(numbers, selected) {
+  const select = document.getElementById("inbound-number-select");
+  const group = document.getElementById("inbound-number-group");
+  const btn = document.getElementById("setup-inbound-btn");
+  const statusEl = document.getElementById("inbound-setup-status");
+  const sip = authMode === "sip";
+  if (group) group.style.display = sip ? "none" : "block";
+  if (btn) btn.style.display = sip ? "none" : "inline-flex";
+  if (statusEl) statusEl.textContent = sip ? ACCOUNT_ONLY : "";
+  if (!select) return;
+  select.innerHTML = "";
+  (numbers || []).forEach(n => {
+    const opt = document.createElement("option");
+    opt.value = n;
+    const d = numberDetails.find(x => x.e164 === n);
+    opt.textContent = d && d.applicationId ? `${n} (now on app ${d.applicationId})` : n;
+    if (n === selected) opt.selected = true;
+    select.appendChild(opt);
+  });
 }
 
 function showLoggedOutState() {
@@ -818,6 +848,7 @@ function showLoggedOutState() {
   if (label) label.style.display = "none";
 
   setAuthMode(authMode);
+  renderInboundOptions([], "");
 }
 
 export async function restoreVobizSession() {
@@ -831,6 +862,7 @@ export async function restoreVobizSession() {
       showLoggedOutState();
       restoreAuthMode();
     } else if (session.loggedIn) {
+      numberDetails = session.numberDetails || [];
       showLoggedInState(session.authId, session.from, session.numbers);
       setLoginStatus(`Signed in as ${session.authId}`);
       setDialEnabled(true);
@@ -910,6 +942,10 @@ export async function placeCall(number) {
       mediaConstraints: { audio: true, video: false },
       pcConfig: { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] },
       sessionTimersExpires: 300,
+      // The caller ID this agent chose, on the INVITE itself. Vobiz hands
+      // X-VH-* headers to the answer webhook, which validates it against the
+      // agent's own numbers. The backend also holds the choice per SIP user.
+      extraHeaders: /^\+[1-9]\d{7,14}$/.test(ownNumber) ? [`X-VH-Caller-ID: ${ownNumber}`] : [],
       ...(micStream ? { mediaStream: micStream } : {}),
     });
 
@@ -989,15 +1025,23 @@ export async function setupInboundCalling() {
   if (btn) btn.setAttribute("disabled", "true");
 
   try {
+    if (authMode === "sip") throw new Error(ACCOUNT_ONLY);
+    const numberSelect = document.getElementById("inbound-number-select");
+    const number = (numberSelect && numberSelect.value) || "";
+    if (!number) throw new Error("Sign in first, then choose one of your numbers.");
     const res = await backendFetch(`${BACKEND_URL}/setup-inbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ number }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Setup failed (${res.status})`);
     if (statusEl) {
-      statusEl.textContent = `Inbound calls to ${data.number} now ring this panel.`;
+      statusEl.textContent = data.previousApplicationId
+        ? `Inbound calls to ${data.number} now ring this panel (moved from app ${data.previousApplicationId}).`
+        : `Inbound calls to ${data.number} now ring this panel.`;
+      const d = numberDetails.find(x => x.e164 === data.number);
+      if (d) d.applicationId = data.appId;
       statusEl.className = "hint is-ok";
     }
   } catch (err) {
@@ -1011,75 +1055,15 @@ export async function setupInboundCalling() {
   }
 }
 
-/** === Provision Dedicated HubSpot App, Endpoint & Number === */
-export async function provisionDedicatedHubSpotApp() {
-  const statusEl = document.getElementById("inbound-setup-status");
-  const btn = document.getElementById("provision-dedicated-btn");
-  const tunnelInput = document.getElementById("hubspot-tunnel-url");
-  const numberInput = document.getElementById("hubspot-link-number");
-
-  const tunnelUrl = (tunnelInput && tunnelInput.value.trim()) || "";
-  const number = (numberInput && numberInput.value.trim()) || "";
-
-  if (!/^\+\d{8,15}$/.test(number)) {
-    if (statusEl) {
-      statusEl.textContent = "Enter the number to link in E.164 format, e.g. +9180XXXXXXXX.";
-      statusEl.className = "hint is-error";
-      statusEl.style.display = "block";
-    }
-    return;
-  }
-
-  if (!tunnelUrl || !tunnelUrl.startsWith("https://")) {
-    if (statusEl) {
-      statusEl.textContent = "Enter this backend's public HTTPS origin, e.g. your cloudflared or ngrok URL.";
-      statusEl.className = "hint is-error";
-      statusEl.style.display = "block";
-    }
-    return;
-  }
-
-  if (statusEl) {
-    statusEl.textContent = "Creating Vobiz Application, Endpoint, and linking number…";
-    statusEl.className = "hint";
-    statusEl.style.display = "block";
-  }
-  if (btn) btn.setAttribute("disabled", "true");
-
-  try {
-    const res = await backendFetch(`${BACKEND_URL}/provision-hubspot-dedicated`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tunnelUrl, number }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `Provisioning failed (${res.status})`);
-
-    if (statusEl) {
-      statusEl.textContent = `Success! App "${data.appName}" created. Endpoint ${data.sipUser.split('@')[0]} bound to ${data.number}. Reconnecting softphone…`;
-      statusEl.className = "hint is-ok";
-      statusEl.style.display = "block";
-    }
-
-    state.fromNumber = data.number;
-    setDialEnabled(true);
-    initVobizSip();
-  } catch (err) {
-    console.error("[Vobiz] Provisioning failed:", err);
-    if (statusEl) {
-      statusEl.textContent = `Provisioning error: ${err.message}`;
-      statusEl.className = "hint is-error";
-      statusEl.style.display = "block";
-    }
-  } finally {
-    if (btn) btn.removeAttribute("disabled");
-  }
-}
-
 /** === Call Recordings === */
 export async function loadRecordings() {
   const listEl = document.getElementById("call-history-list");
   if (!listEl) return;
+  if (authMode === "sip") {
+    // Recordings need the account API; SIP direct has no account credentials.
+    listEl.innerHTML = "<li style='color:var(--text-3);'>" + ACCOUNT_ONLY + "</li>";
+    return;
+  }
   listEl.innerHTML = "<li>Loading recordings…</li>";
 
   try {
@@ -1264,8 +1248,6 @@ function setupEventListeners() {
   if (hangupBtn) hangupBtn.addEventListener("click", hangUp);
   if (loginBtn) loginBtn.addEventListener("click", vobizLogin);
   if (logoutBtn) logoutBtn.addEventListener("click", vobizLogout);
-  const provisionBtn = document.getElementById("provision-dedicated-btn");
-  if (provisionBtn) provisionBtn.addEventListener("click", provisionDedicatedHubSpotApp);
 
   if (numberSelect) numberSelect.addEventListener("change", vobizSelectNumber);
   if (setupInboundBtn) setupInboundBtn.addEventListener("click", setupInboundCalling);

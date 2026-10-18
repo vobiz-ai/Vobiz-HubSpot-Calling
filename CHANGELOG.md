@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Any Vobiz account can sign in. No Auth ID, Auth Token, number or SIP
+  credential in `.env`; `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`,
+  `VOBIZ_FROM_NUMBER` and `VOBIZ_SIP_*` are ignored. Each account gets this
+  integration's application and per-agent endpoints at sign-in.
+- Caller-ID dropdown from the account's own active, voice-enabled numbers (all
+  pages); any other caller ID is refused. `X-VH-Caller-ID` on the INVITE.
+- **Enable inbound calls**: the only action that attaches a number.
+- Inbound routing by `ParentAuthID`, then by dialled number, per account.
+- SIP direct sign-in that needs no backend credentials.
 - One SIP endpoint per agent, created on first sign-in and reused afterwards.
   Inbound rings every signed-in agent; the first to answer takes the call.
 - Session tokens: `/login` returns one, and every widget route requires it.
@@ -16,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Inbound with no matching agent rang every signed-in agent, across accounts.
+- Sign-in attached the selected number to the application, moving it off
+  whatever app it was on.
+- Any application whose name contained "hubspot" could be repointed.
+- The 17-digit app id was sent as `{ app_id: <number> }`.
+- Recording links were not tied to an account.
 - SIP credentials could be obtained without valid Vobiz credentials
   (`/login-sip`, and `/login` with an `MA_…test…` Auth ID).
 - Hardcoded SIP passwords (`vobiz123`, and a fixed one in provisioning).
@@ -46,7 +61,6 @@ First public release.
   answers `<Dial><Number>`. Originating to the customer over REST and bridging
   the agent in with `<Dial><User>` does not work — routing into a registered
   WebRTC endpoint is blocked platform-side. Inbound is the exception.
-- Single-account by design in this release. See the known limitations in the
-  README before deploying for more than one agent.
+- Single-account by design in this release (lifted in Unreleased).
 
 [1.0.0]: https://github.com/vobiz-ai/Vobiz-HubSpot-Calling/releases/tag/v1.0.0
