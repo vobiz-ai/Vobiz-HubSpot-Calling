@@ -5,7 +5,7 @@
 **A softphone inside HubSpot. Agents call from a contact record, talk in the browser, and HubSpot logs the call against that contact automatically.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-e83c00.svg)](LICENSE)
-[![Node 18+](https://img.shields.io/badge/Node-18%2B-339933.svg)](https://nodejs.org)
+[![Node 20.12+](https://img.shields.io/badge/Node-20.12%2B-339933.svg)](https://nodejs.org)
 
 [Setup](docs/SETUP_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Docs](https://www.vobiz.ai/docs/integrations/hubspot)
 
@@ -60,7 +60,7 @@ app needs no CRM scopes.
 
 ## Quick start
 
-Requires **Node 18+**, a [Vobiz](https://console.vobiz.ai) account with a number
+Requires **Node 20.12+** (the backend reads `.env` with `process.loadEnvFile`), a [Vobiz](https://console.vobiz.ai) account with a number
 and balance, a HubSpot account with developer tools, and `cloudflared` (or
 ngrok) for a public HTTPS URL.
 
@@ -100,12 +100,14 @@ Copy `backend/.env.example` to `backend/.env`. Everything is set there.
 | --- | --- |
 | `VOBIZ_AUTH_ID` / `VOBIZ_AUTH_TOKEN` | From the Vobiz console, under API credentials |
 | `VOBIZ_FROM_NUMBER` | A DID this account owns, used as the outbound caller ID |
-| `VOBIZ_SIP_USER` / `VOBIZ_SIP_PASSWORD` | The SIP endpoint the widget registers as |
+| `VOBIZ_SIP_USER` / `VOBIZ_SIP_PASSWORD` | **Leave empty** for teams: each agent gets their own endpoint on first sign-in. Set both only for a single-agent install that should register as one existing endpoint |
 | `PUBLIC_BASE` | The public HTTPS URL Vobiz can reach |
 | `HUBSPOT_CLIENT_ID` / `HUBSPOT_CLIENT_SECRET` | From your HubSpot app |
 | `SIGNING_SECRET` | Signs recording links. Set it explicitly — a random key each boot invalidates older links |
 | `RECORDING_URL_TTL_SECONDS` | How long a recording link stays valid |
-| `ALLOWED_ORIGINS` | CORS allowlist |
+| `ALLOWED_ORIGINS` | Extra CORS origins. HubSpot, localhost and `PUBLIC_BASE` are allowed by default |
+| `AGENT_ENDPOINT_STORE` | Where the agent → endpoint-id map is kept (default `backend/agent-endpoints.json`, mode 0600, git-ignored, holds no passwords) |
+| `SESSION_TTL_HOURS` | How long a widget sign-in lasts (default 12) |
 
 ## Endpoints
 
@@ -115,7 +117,8 @@ Copy `backend/.env.example` to `backend/.env`. Everything is set there.
 | POST | `/dial-status` | The `action` target of `<Dial>` — how the call ended |
 | POST | `/recording-ready` | Fires when the recording is downloadable |
 | POST | `/start-call` | The widget's click-to-dial entry point |
-| POST | `/login`, `/login-sip`, `/logout` | Session handling |
+| POST | `/login`, `/login-sip`, `/logout` | Sign-in. `/login` checks the Auth ID / Auth Token against Vobiz and returns a session token; every other widget route needs `Authorization: Bearer <token>` |
+| GET | `/agent` | This agent's own SIP identity (session token required) |
 | POST | `/select-number` | Sets the outbound caller ID |
 | POST | `/setup-inbound` | Creates the application, binds the endpoint, attaches the DID |
 | GET | `/hubspot/install`, `/hubspot/callback`, `/hubspot/status` | HubSpot OAuth |
@@ -159,11 +162,16 @@ debugging.
 
 ## Known limitations
 
-- **The backend is single-account.** It binds to one Vobiz account through
-  `.env`, and every agent who signs in shares one SIP endpoint. Two agents on
-  one install register as the same endpoint and race for calls. Real
-  multi-agent use needs an endpoint per agent and an identity store.
-- **`agentId` is self-asserted.** It selects a label, not an identity.
+- **One Vobiz account per backend.** If `VOBIZ_AUTH_ID` is set, only that
+  account can sign in.
+- **Agents sign in with the account's Auth ID and Auth Token.** Every agent
+  who uses the widget therefore holds the account's API credentials. Use SIP
+  direct sign-in (endpoint username + password) for agents who should not.
+- **Inbound rings every signed-in agent** whose session has the dialled
+  number (or every signed-in agent, if none claims it); the first to answer
+  takes the call. There is no queue, skills routing or per-number assignment.
+- **Each sign-in sets a new password on that agent's endpoint**, so signing in
+  from a second browser logs the first one out of SIP at its next re-register.
 - **Quick tunnels are the most common cause of "it stopped working."** Use a
   stable hostname for anything beyond a demo.
 

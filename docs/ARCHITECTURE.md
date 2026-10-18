@@ -41,8 +41,10 @@ flowchart TD
 ## Core Operational Phases
 
 ### 1. Agent registration
-The widget fetches its SIP identity from `GET /agent/{agentId}` — which the
-backend serves **only to a logged-in agent** — and registers with
+On sign-in the backend finds or creates **this agent's own Vobiz endpoint**
+(keyed on the agent id, persisted in `backend/agent-endpoints.json` without any
+password), sets a fresh random password on it, and returns a session token. The
+widget fetches its SIP identity from `GET /agent` with that token — and registers with
 `wss://registrar.vobiz.ai:5063/` using `session_timers: false`, a space-free
 `user_agent`, and STUN.
 

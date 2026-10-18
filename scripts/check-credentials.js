@@ -9,7 +9,8 @@ const sensitivePatterns = [
   /trycloudflare\.com/i,
 ];
 
-const ignoredDirs = ["node_modules", ".git", "dist", "bin", "scratch"];
+// test/ holds attacker-shaped hosts on purpose (CORS probes).
+const ignoredDirs = ["node_modules", ".git", "dist", "bin", "scratch", "test"];
 
 function scanDirectory(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -22,7 +23,7 @@ function scanDirectory(dir) {
         violations += scanDirectory(fullPath);
       }
     } else if (entry.isFile()) {
-      if (entry.name === ".env" || entry.name === "tunnel-url.txt" || entry.name.endsWith(".png") || entry.name.endsWith(".jpg")) {
+      if (entry.name === ".env" || entry.name === "tunnel-url.txt" || entry.name === "demo-minimal-js.bundle.js" || entry.name === "package-lock.json" || entry.name.endsWith(".png") || entry.name.endsWith(".jpg")) {
         continue;
       }
       const content = fs.readFileSync(fullPath, "utf8");

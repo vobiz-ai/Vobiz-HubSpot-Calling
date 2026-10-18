@@ -25,5 +25,8 @@ jobs:
       - name: Verify Webpack Build
         run: npm run build
 
+      - name: Run tests
+        run: npm test
+
       - name: Run Credential Security Audit
         run: node scripts/check-credentials.js

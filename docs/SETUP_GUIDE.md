@@ -2,7 +2,7 @@
 
 One-time setup, in order. Each step depends on the one before it.
 
-You need: Node 18+, a Vobiz account with a number and balance, a HubSpot account
+You need: Node 20.12+, a Vobiz account with a number and balance, a HubSpot account
 with developer tools, and `cloudflared` (or ngrok) for a public HTTPS URL.
 
 ---
@@ -13,7 +13,14 @@ Place a call with [rtc-demo.vobiz.ai](https://rtc-demo.vobiz.ai/). If that
 fails, nothing here will work and you will spend a day debugging the wrong
 layer.
 
-## 2. Create the SIP endpoint
+## 2. SIP endpoints (usually nothing to do)
+
+Leave `VOBIZ_SIP_USER` and `VOBIZ_SIP_PASSWORD` empty. Each agent then gets an
+endpoint of their own the first time they sign in to the widget; the backend
+reads back the username Vobiz stored and keeps only the agent → endpoint-id map.
+
+Only for a **single-agent** install that should register as an existing
+endpoint, create one and put it in `.env`:
 
 ```bash
 curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Endpoint/" \
@@ -57,13 +64,10 @@ hears ringback, then "the agent could not be reached".
 
 ## 4. Point Vobiz at the backend
 
-With the widget signed in, `POST /setup-inbound` does all three steps —
-creates the application, binds the endpoint, attaches the DID:
-
-```bash
-curl -X POST "$PUBLIC_BASE/setup-inbound" \
-  -H 'Content-Type: application/json' -d '{"agentId":"test-agent"}'
-```
+Signing in to the widget does all three steps — creates (or reuses) the
+"HubSpot Calling" application with `answer_url` = `$PUBLIC_BASE/answer`, binds
+the agent's endpoint to it, and attaches the selected DID. The **Set up inbound**
+button in the widget re-runs it (`POST /setup-inbound`, session token required).
 
 Two undocumented things it works around:
 

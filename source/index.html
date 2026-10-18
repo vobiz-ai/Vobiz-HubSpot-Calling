@@ -111,10 +111,10 @@
 
               <div class="form-group">
                 <label class="check-row" for="vobiz-remember">
-                  <input type="checkbox" id="vobiz-remember" checked />
+                  <input type="checkbox" id="vobiz-remember" />
                   <span>
-                    Remember these credentials
-                    <small>Stored only in this browser's localStorage.</small>
+                    Remember my Auth ID
+                    <small>The Auth Token is never stored in the browser.</small>
                   </span>
                 </label>
               </div>
@@ -189,8 +189,8 @@
               <label class="check-row" for="sip-remember">
                 <input type="checkbox" id="sip-remember" />
                 <span class="check-text">
-                  Remember these
-                  <span class="check-note">Kept in this browser, on this machine. Leave off on a shared computer.</span>
+                  Remember username and caller ID
+                  <span class="check-note">The SIP password is never stored in the browser.</span>
                 </span>
               </label>
 
@@ -317,7 +317,7 @@
             </div>
           </div>
           <p class="step-help">
-            Automatically create a dedicated VoBiz Application & SIP Endpoint for HubSpot, and link <strong>+91XXXXXXXXXX</strong> with Answer & Hangup URLs.
+            Create a dedicated Vobiz application for HubSpot, bind your SIP endpoint to it, and link a number on your account with the answer and hangup URLs set.
           </p>
 
           <div class="form-group" style="margin-bottom: 8px;">
@@ -326,7 +326,7 @@
               type="url"
               id="hubspot-tunnel-url"
               class="input input-mono"
-              value="https://your-tunnel.trycloudflare.com"
+              placeholder="https://your-public-host.example.com"
             />
           </div>
 
@@ -336,7 +336,7 @@
               type="text"
               id="hubspot-link-number"
               class="input input-mono"
-              value="+91XXXXXXXXXX"
+              placeholder="+9180XXXXXXXX"
             />
           </div>
 

@@ -102,7 +102,8 @@ Two very different causes, same symptom:
 
 1. **A dead answer URL.** Vobiz fetched a 404 page instead of XML. Curl it.
 2. **`<Dial><User>` naming an endpoint that is not registered** — for example a
-   placeholder identity out of `agents.json` rather than `VOBIZ_SIP_USER`.
+   placeholder identity out of `agents.json`, or an agent who has not signed
+   in to the widget (inbound rings only signed-in agents).
 
 ### No CDR exists at all
 

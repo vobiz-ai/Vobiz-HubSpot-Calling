@@ -26,7 +26,22 @@ function getQueryParam(param) {
 }
 
 const BACKEND_URL = getQueryParam("backendUrl") || (typeof window !== "undefined" ? window.location.origin : "http://localhost:8092");
-const AGENT_ID = getQueryParam("agentId") || "test-agent";
+// Who this agent is. Each agent gets their own Vobiz SIP endpoint keyed on this,
+// so it must differ between agents: an explicit ?agentId= wins, then the
+// HubSpot user id from onReady, then an id generated once for this browser.
+// It is a lookup key, not a credential — the session token is the credential.
+const AGENT_ID_KEY = "vobiz.agentId";
+function currentAgentId() {
+  const fromQuery = getQueryParam("agentId");
+  if (fromQuery) return fromQuery;
+  if (state.userId) return `hs${state.userId}`;
+  let id = readStore(AGENT_ID_KEY);
+  if (!id) {
+    id = `agent-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+    writeStore(AGENT_ID_KEY, id);
+  }
+  return id;
+}
 const VOBIZ_SIP_DOMAIN = "registrar.vobiz.ai";
 const VOBIZ_SIP_WS_URI = "wss://registrar.vobiz.ai:5063/";
 
@@ -71,6 +86,21 @@ function isInsideHubSpotIframe() {
   }
 }
 
+// HubSpot writes the call to the timeline on callCompleted, not callEnded.
+// Send it once per call, after callEnded.
+let completedCallId = "";
+function completeCall() {
+  if (!state.externalCallId || completedCallId === state.externalCallId) return;
+  completedCallId = state.externalCallId;
+  notifyHubSpot(() => {
+    cti.callCompleted({
+      ...(state.engagementId ? { engagementId: state.engagementId } : {}),
+      externalCallId: state.externalCallId,
+      hideWidget: false,
+    });
+  });
+}
+
 function notifyHubSpot(action) {
   if (!isInsideHubSpotIframe()) return;
   try {
@@ -97,8 +127,24 @@ function writeStore(key, value) {
 async function backendFetch(url, options = {}) {
   return fetch(url, {
     ...options,
-    headers: { "ngrok-skip-browser-warning": "1", ...(options.headers || {}) },
+    headers: {
+      "ngrok-skip-browser-warning": "1",
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      ...(options.headers || {}),
+    },
   });
+}
+
+// The backend session token. Kept for this tab only (sessionStorage), never
+// the Vobiz Auth Token or a SIP password, which are not stored at all.
+const SESSION_TOKEN_KEY = "vobiz.sessionToken";
+let sessionToken = (() => { try { return sessionStorage.getItem(SESSION_TOKEN_KEY) || ""; } catch { return ""; } })();
+function setSessionToken(token) {
+  sessionToken = token || "";
+  try {
+    if (sessionToken) sessionStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
+    else sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {}
 }
 
 /** === Status Badge & Message (Matching Freshdesk) === */
@@ -325,6 +371,7 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
     const ownNumber = (numberSelect && numberSelect.value) || state.fromNumber || "VoBiz Line";
 
     state.externalCallId = uuidv4();
+    state.engagementId = 0;
     state.fromNumber = fromNumber;
     pendingIncomingSession = data.session;
 
@@ -362,6 +409,7 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
       notifyHubSpot(() => {
         cti.callEnded({ callEndStatus: callEndStatus.INTERNAL_COMPLETED, externalCallId: state.externalCallId });
       });
+      completeCall();
       pendingIncomingSession = null;
     });
 
@@ -371,6 +419,7 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
       notifyHubSpot(() => {
         cti.callEnded({ callEndStatus: callEndStatus.FAILED, externalCallId: state.externalCallId });
       });
+      completeCall();
       pendingIncomingSession = null;
     });
   });
@@ -382,9 +431,9 @@ export function startSipUA(sipUser, sipPassword, displayName, registrarUrl) {
 export async function initVobizSip() {
   let agent;
   try {
-    const res = await backendFetch(`${BACKEND_URL}/agent/${encodeURIComponent(AGENT_ID)}`);
+    const res = await backendFetch(`${BACKEND_URL}/agent`);
     if (!res.ok) {
-      setStatus(`Could not load SIP identity for ${AGENT_ID}`);
+      setStatus("Could not load this agent's SIP identity — sign in again");
       setSipRegistered(false);
       return;
     }
@@ -503,6 +552,7 @@ export async function answerIncomingCall() {
       notifyHubSpot(() => {
         cti.callEnded({ callEndStatus: callEndStatus.INTERNAL_COMPLETED, externalCallId: state.externalCallId });
       });
+      completeCall();
       setTimeout(loadRecordings, 4000);
     });
 
@@ -515,6 +565,7 @@ export async function answerIncomingCall() {
       notifyHubSpot(() => {
         cti.callEnded({ callEndStatus: callEndStatus.FAILED, externalCallId: state.externalCallId });
       });
+      completeCall();
     });
   } catch (err) {
     console.error("[VoBiz] Error answering call:", err);
@@ -540,6 +591,7 @@ export function declineIncomingCall() {
       externalCallId: state.externalCallId,
     });
   });
+  completeCall();
 
   setStatus("Call declined");
   setTimeout(() => setStatus("Ready"), 3000);
@@ -584,13 +636,9 @@ export function restoreAuthMode() {
     const rememberInput = document.getElementById("sip-remember");
 
     if (usernameInput) usernameInput.value = saved.username || "";
-    if (passwordInput) passwordInput.value = saved.password || "";
+    if (passwordInput) passwordInput.value = "";
     if (callerIdInput) callerIdInput.value = saved.callerId || "";
     if (rememberInput) rememberInput.checked = true;
-
-    if (saved.password && saved.callerId) {
-      sipDirectConnect();
-    }
   } else {
     const saved = readStore(ACCOUNT_CREDS_KEY);
     if (!saved || !saved.authId) return;
@@ -599,12 +647,8 @@ export function restoreAuthMode() {
     const rememberInput = document.getElementById("vobiz-remember");
 
     if (authIdInput) authIdInput.value = saved.authId || "";
-    if (authTokenInput) authTokenInput.value = saved.authToken || "";
+    if (authTokenInput) authTokenInput.value = "";
     if (rememberInput) rememberInput.checked = true;
-
-    if (saved.authId && saved.authToken) {
-      vobizLogin();
-    }
   }
 }
 
@@ -629,20 +673,28 @@ export async function sipDirectConnect() {
     return;
   }
 
-  writeStore(SIP_CREDS_KEY, remember ? { username, password, callerId } : null);
+  // The SIP password is never written to storage.
+  writeStore(SIP_CREDS_KEY, remember ? { username, callerId } : null);
 
   const cleanUsername = username.includes("@") ? username.split("@")[0] : username;
   const sipUser = `${cleanUsername}@${VOBIZ_SIP_DOMAIN}`;
   setLoginStatus(`Signing in as ${cleanUsername}…`);
 
+  // The backend checks the endpoint and caller ID belong to the account, so it
+  // can route inbound calls here and use this caller ID outbound. The password
+  // stays in the browser.
   try {
-    await backendFetch(`${BACKEND_URL}/login-sip`, {
+    const res = await backendFetch(`${BACKEND_URL}/login-sip`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID, sipUser: cleanUsername, sipPassword: password, callerId }),
+      body: JSON.stringify({ agentId: currentAgentId(), sipUser: cleanUsername, callerId }),
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Sign-in failed (${res.status})`);
+    setSessionToken(data.token);
   } catch (err) {
-    console.warn("[VoBiz] Backend /login-sip registration note:", err);
+    setLoginStatus(`SIP direct sign-in failed: ${err.message}`, true);
+    return;
   }
 
   state.fromNumber = callerId;
@@ -671,14 +723,17 @@ export async function vobizLogin() {
     const res = await backendFetch(`${BACKEND_URL}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID, authId, authToken }),
+      body: JSON.stringify({ agentId: currentAgentId(), authId, authToken }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Login failed (${res.status})`);
+    setSessionToken(data.token);
 
+    // Remember the Auth ID only. The Auth Token is never stored in the browser.
     const rememberInput = document.getElementById("vobiz-remember");
-    const remember = !rememberInput || Boolean(rememberInput.checked);
-    writeStore(ACCOUNT_CREDS_KEY, remember ? { authId, authToken } : null);
+    const remember = Boolean(rememberInput && rememberInput.checked);
+    writeStore(ACCOUNT_CREDS_KEY, remember ? { authId } : null);
+    if (authTokenInput) authTokenInput.value = "";
 
     // Update UI
     showLoggedInState(data.authId || authId, data.selected, data.numbers);
@@ -706,11 +761,11 @@ export async function vobizLogout() {
     await backendFetch(`${BACKEND_URL}/logout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID }),
     });
   } catch (e) {
     console.warn("Logout error:", e);
   }
+  setSessionToken("");
 
   writeStore(ACCOUNT_CREDS_KEY, null);
   writeStore(SIP_CREDS_KEY, null);
@@ -767,9 +822,15 @@ function showLoggedOutState() {
 
 export async function restoreVobizSession() {
   try {
-    const res = await backendFetch(`${BACKEND_URL}/session/${encodeURIComponent(AGENT_ID)}`);
+    if (!sessionToken) throw new Error("no session");
+    const res = await backendFetch(`${BACKEND_URL}/session`);
     const session = await res.json();
-    if (session.loggedIn) {
+    if (session.loggedIn && session.kind === "sip") {
+      // SIP direct needs the password, which is deliberately not kept.
+      setSessionToken("");
+      showLoggedOutState();
+      restoreAuthMode();
+    } else if (session.loggedIn) {
       showLoggedInState(session.authId, session.from, session.numbers);
       setLoginStatus(`Signed in as ${session.authId}`);
       setDialEnabled(true);
@@ -777,11 +838,11 @@ export async function restoreVobizSession() {
       initVobizSip();
       loadRecordings();
     } else {
+      setSessionToken("");
       showLoggedOutState();
       restoreAuthMode();
     }
   } catch (err) {
-    console.warn("[VoBiz] Could not restore session:", err);
     showLoggedOutState();
     restoreAuthMode();
   }
@@ -793,7 +854,7 @@ export async function vobizSelectNumber() {
     const res = await backendFetch(`${BACKEND_URL}/select-number`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID, number }),
+      body: JSON.stringify({ number }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Failed to switch number (${res.status})`);
@@ -827,6 +888,7 @@ export async function placeCall(number) {
 
   await ensureMicPermission();
   state.externalCallId = uuidv4();
+  state.engagementId = 0;
 
   const numberSelect = document.getElementById("vobiz-number-select");
   const ownNumber = (numberSelect && numberSelect.value) || state.fromNumber || "";
@@ -877,6 +939,7 @@ export async function placeCall(number) {
       notifyHubSpot(() => {
         cti.callEnded({ callEndStatus: callEndStatus.FAILED, externalCallId: state.externalCallId });
       });
+      completeCall();
     });
 
     session.on("ended", () => {
@@ -888,6 +951,7 @@ export async function placeCall(number) {
       notifyHubSpot(() => {
         cti.callEnded({ externalCallId: state.externalCallId });
       });
+      completeCall();
       setTimeout(loadRecordings, 5000);
       setTimeout(() => setCallStatus(""), 4000);
     });
@@ -900,6 +964,7 @@ export async function placeCall(number) {
     notifyHubSpot(() => {
       cti.callEnded({ callEndStatus: callEndStatus.FAILED, externalCallId: state.externalCallId });
     });
+    completeCall();
   }
 }
 
@@ -927,7 +992,7 @@ export async function setupInboundCalling() {
     const res = await backendFetch(`${BACKEND_URL}/setup-inbound`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID }),
+      body: JSON.stringify({}),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Setup failed (${res.status})`);
@@ -954,11 +1019,20 @@ export async function provisionDedicatedHubSpotApp() {
   const numberInput = document.getElementById("hubspot-link-number");
 
   const tunnelUrl = (tunnelInput && tunnelInput.value.trim()) || "";
-  const number = (numberInput && numberInput.value.trim()) || "+91XXXXXXXXXX";
+  const number = (numberInput && numberInput.value.trim()) || "";
+
+  if (!/^\+\d{8,15}$/.test(number)) {
+    if (statusEl) {
+      statusEl.textContent = "Enter the number to link in E.164 format, e.g. +9180XXXXXXXX.";
+      statusEl.className = "hint is-error";
+      statusEl.style.display = "block";
+    }
+    return;
+  }
 
   if (!tunnelUrl || !tunnelUrl.startsWith("https://")) {
     if (statusEl) {
-      statusEl.textContent = "Enter a valid public HTTPS tunnel URL (e.g. https://xxxx.trycloudflare.com or ngrok).";
+      statusEl.textContent = "Enter this backend's public HTTPS origin, e.g. your cloudflared or ngrok URL.";
       statusEl.className = "hint is-error";
       statusEl.style.display = "block";
     }
@@ -976,7 +1050,7 @@ export async function provisionDedicatedHubSpotApp() {
     const res = await backendFetch(`${BACKEND_URL}/provision-hubspot-dedicated`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT_ID, tunnelUrl, number }),
+      body: JSON.stringify({ tunnelUrl, number }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Provisioning failed (${res.status})`);
@@ -988,9 +1062,8 @@ export async function provisionDedicatedHubSpotApp() {
     }
 
     state.fromNumber = data.number;
-    showLoggedInState(data.sipUser.split('@')[0], data.number, [data.number]);
     setDialEnabled(true);
-    startSipUA(data.sipUser, data.sipPassword, data.sipUser.split('@')[0]);
+    initVobizSip();
   } catch (err) {
     console.error("[VoBiz] Provisioning failed:", err);
     if (statusEl) {
@@ -1010,7 +1083,7 @@ export async function loadRecordings() {
   listEl.innerHTML = "<li>Loading recordings…</li>";
 
   try {
-    const res = await backendFetch(`${BACKEND_URL}/recordings/${encodeURIComponent(AGENT_ID)}?limit=15`);
+    const res = await backendFetch(`${BACKEND_URL}/recordings?limit=15`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || "Could not load recordings");
     renderRecordings(json.objects || []);
@@ -1134,6 +1207,10 @@ const cti = new CallingExtensions({
         placeCall(phoneNumber);
       }
     },
+    onCreateEngagementSucceeded: (data) => {
+      state.engagementId = data && data.engagementId;
+    },
+    // Deprecated name; older SDK builds still send it.
     onEngagementCreated: (data) => {
       state.engagementId = data && data.engagementId;
     },
