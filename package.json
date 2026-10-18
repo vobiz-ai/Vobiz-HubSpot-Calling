@@ -1,7 +1,7 @@
 {
   "name": "vobiz-hubspot-integration",
   "version": "2.0.0",
-  "description": "VoBiz Telephony & WebRTC Softphone Integration for HubSpot CRM",
+  "description": "Vobiz Telephony & WebRTC Softphone Integration for HubSpot CRM",
   "main": "source/index.js",
   "scripts": {
     "build": "webpack",

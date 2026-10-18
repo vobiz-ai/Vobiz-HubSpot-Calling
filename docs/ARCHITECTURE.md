@@ -1,6 +1,6 @@
-# Technical Architecture — VoBiz HubSpot Integration
+# Technical Architecture — Vobiz HubSpot Integration
 
-This document describes the high-level architecture, communication protocols, and sequence flows for the **VoBiz Calling Integration for HubSpot CRM**.
+This document describes the high-level architecture, communication protocols, and sequence flows for the **Vobiz Calling Integration for HubSpot CRM**.
 
 ---
 
@@ -17,9 +17,9 @@ flowchart TD
         Tunnel["Cloudflare / Tunnelmole HTTPS Public Endpoint"]
     end
 
-    subgraph VoBizCloud["VoBiz Voice Platform"]
-        API["VoBiz REST Call API"]
-        Registrar["VoBiz SIP Registrar (wss://registrar.vobiz.ai:5063/)"]
+    subgraph VobizCloud["Vobiz Voice Platform"]
+        API["Vobiz REST Call API"]
+        Registrar["Vobiz SIP Registrar (wss://registrar.vobiz.ai:5063/)"]
     end
 
     subgraph CustomerCarrier["PSTN Network"]
