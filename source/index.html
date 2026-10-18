@@ -72,7 +72,7 @@
 
           <div id="vobiz-user-card" class="user-card" style="display:none;">
             <div class="user-card-info">
-              <span id="vobiz-user-auth-id" class="user-card-id">MA_XXXXXXXX</span>
+              <span id="vobiz-user-auth-id" class="user-card-id"></span>
               <span id="vobiz-user-from" class="user-card-number">No number assigned</span>
             </div>
             <span class="status-badge is-ok">Active</span>
@@ -145,7 +145,9 @@
               The endpoint's own SIP credentials, from
               <a href="https://console.vobiz.ai" target="_blank" rel="noopener">Console</a> &rarr;
               Voice &rarr; Endpoints. Signs in as that one endpoint, without
-              account-wide credentials.
+              account-wide credentials. The endpoint and the caller-ID number must
+              already be attached to a Vobiz application whose answer URL is this
+              backend. Recordings and inbound setup need the Vobiz account sign-in.
             </p>
 
             <div id="vobiz-sip-form">
@@ -255,7 +257,7 @@
                 type="tel"
                 id="dialnumber"
                 class="input input-mono input-dial"
-                placeholder="+91 98765 43210"
+                placeholder="+CC number"
               />
             </div>
             <div class="actions">
@@ -308,43 +310,27 @@
           </div>
         </section>
 
-        <!-- Step 4 — Dedicated HubSpot App & Inbound Routing -->
-        <section class="step step-optional">
+        <!-- Step 4 — Enable inbound calls -->
+        <section class="step step-optional" id="step-inbound">
           <div class="step-head">
             <div class="step-head-left">
               <span class="step-num step-num-optional">4</span>
-              <h2 class="step-title">Dedicated HubSpot App & Routing</h2>
+              <h2 class="step-title">Enable inbound calls</h2>
             </div>
           </div>
-          <p class="step-help">
-            Create a dedicated Vobiz application for HubSpot, bind your SIP endpoint to it, and link a number on your account with the answer and hangup URLs set.
+          <p class="step-help" id="inbound-help">
+            Points one of your Vobiz numbers at this integration, so calls to it
+            ring the agents signed in to your account here. This moves the number
+            off any other Vobiz application it is attached to now.
           </p>
 
-          <div class="form-group" style="margin-bottom: 8px;">
-            <label class="field-label" for="hubspot-tunnel-url">Public Webhook / Tunnel URL (HTTPS)</label>
-            <input
-              type="url"
-              id="hubspot-tunnel-url"
-              class="input input-mono"
-              placeholder="https://your-public-host.example.com"
-            />
+          <div class="form-group" style="margin-bottom: 12px;" id="inbound-number-group">
+            <label class="field-label" for="inbound-number-select">Number to receive calls on</label>
+            <select id="inbound-number-select" class="input"></select>
           </div>
 
-          <div class="form-group" style="margin-bottom: 12px;">
-            <label class="field-label" for="hubspot-link-number">Number to link to HubSpot</label>
-            <input
-              type="text"
-              id="hubspot-link-number"
-              class="input input-mono"
-              placeholder="+9180XXXXXXXX"
-            />
-          </div>
-
-          <button id="provision-dedicated-btn" class="btn btn-primary" type="button">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
-            </svg>
-            Provision Dedicated App & Number
+          <button id="setup-inbound-btn" class="btn btn-primary" type="button">
+            Enable inbound calls
           </button>
           <p id="inbound-setup-status" class="hint"></p>
         </section>

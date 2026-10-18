@@ -2,7 +2,7 @@
 
 One-time setup, in order. Each step depends on the one before it.
 
-You need: Node 20.12+, a Vobiz account with a number and balance, a HubSpot account
+You need: Node 20.12+, a Vobiz account with a number and balance (per team that signs in), a HubSpot account
 with developer tools, and `cloudflared` (or ngrok) for a public HTTPS URL.
 
 ---
@@ -13,36 +13,18 @@ Place a call with [rtc-demo.vobiz.ai](https://rtc-demo.vobiz.ai/). If that
 fails, nothing here will work and you will spend a day debugging the wrong
 layer.
 
-## 2. SIP endpoints (usually nothing to do)
+## 2. Nothing account-specific to configure
 
-Leave `VOBIZ_SIP_USER` and `VOBIZ_SIP_PASSWORD` empty. Each agent then gets an
-endpoint of their own the first time they sign in to the widget; the backend
-reads back the username Vobiz stored and keeps only the agent → endpoint-id map.
-
-Only for a **single-agent** install that should register as an existing
-endpoint, create one and put it in `.env`:
-
-```bash
-curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Endpoint/" \
-  -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"hsagent","password":"<choose one>","alias":"HubSpot Agent"}'
-```
-
-> **Vobiz rewrites the username you submit.** Send `hsagent` and the stored
-> username comes back as something like `hsagentXXXXXXXXXXXXXXXXXXXX`.
-> Read the stored `username` out of the response — that is what registers, and
-> what `VOBIZ_SIP_USER` must contain. Registering the name you chose fails in a
-> way that looks like bad credentials.
-
-**Use a separate endpoint per integration.** An endpoint binds to exactly one
-Vobiz application at a time, so sharing one between HubSpot and another CRM
-silently breaks whichever was configured first.
+There is no Vobiz Auth ID, Auth Token, number, SIP user or SIP password in
+`.env`, and no endpoint to create by hand. Each agent signs in to the panel with
+their own account's Auth ID and Auth Token, and the backend provisions
+everything in that account (step 4). Any number of Vobiz accounts can use one
+deployment.
 
 ## 3. Configure and start the backend
 
 ```bash
-cp backend/.env.example backend/.env    # then fill it in
+cp backend/.env.example backend/.env    # PUBLIC_BASE, SIGNING_SECRET, HubSpot app keys
 npm install
 npx webpack                             # build the widget bundle
 npm start                               # :8092
@@ -54,29 +36,67 @@ Put the tunnel URL in `PUBLIC_BASE` and restart.
 **Check the answer URL before touching any UI:**
 
 ```bash
-curl -s -X POST "$PUBLIC_BASE/answer" \
-  -d "From=sip:x@registrar.vobiz.ai&To=91XXXXXXXXXX&RouteType=sip"
+curl -s -X POST "$PUBLIC_BASE/answer" -d "Event=Hangup"
 ```
 
-Must return `<Response>` containing `<Dial …><Number>`. A dead answer URL
-produces the exact symptom people blame on registration: the customer answers,
-hears ringback, then "the agent could not be reached".
+Must return XML (`<Response></Response>`). A dead answer URL produces the exact
+symptom people blame on registration: the customer answers, hears ringback,
+then "the agent could not be reached".
 
-## 4. Point Vobiz at the backend
+## 4. What sign-in does in the agent's Vobiz account
 
-Signing in to the widget does all three steps — creates (or reuses) the
-"HubSpot Calling" application with `answer_url` = `$PUBLIC_BASE/answer`, binds
-the agent's endpoint to it, and attaches the selected DID. The **Set up inbound**
-button in the widget re-runs it (`POST /setup-inbound`, session token required).
+**Vobiz account sign-in** (Auth ID + Auth Token):
 
-Two undocumented things it works around:
+1. Verifies the pair with `GET /Account/{authId}/numbers`. A non-2xx is a 401.
+2. Reads every page of the account's numbers. Active, voice-enabled numbers
+   become the caller-ID dropdown, and only those are accepted as caller ID.
+3. Finds or creates the application `vobiz-hubspot-calling-integration` with
+   `answer_url` and `hangup_url` = `$PUBLIC_BASE/answer` (POST). It reuses an
+   application only if the answer URL matches exactly or the name is exactly
+   that one. No other application in the account is touched.
+4. Finds or creates the agent's own endpoint (alias `hubspot-<agentId>`), sets
+   a fresh random password on it, and gives that password to that agent's
+   browser only. Vobiz rewrites the submitted username, so the stored one is
+   read back with `GET /Endpoint/{id}/`.
+5. Binds the endpoint to the application with `{"app_id":"<id>"}`, checks it
+   with a GET, and falls back to the documented `{"application": <id>}`.
+   App ids are 17 digits, larger than JavaScript can hold exactly as a
+   number, so they stay strings throughout.
 
-- The endpoint-binding field is **`app_id`**, not the documented `application`,
-  which is silently ignored and still returns `202 "changed"`.
-- DID attachment is `POST /numbers/%2B<e164>/application` with
-  `{"application_id": …}`. The `+` must be percent-encoded, and `/Number/`
-  returns a bare `401 Unauthorised` that reads exactly like a credentials
-  problem and is not one.
+Sign-in never attaches a number. **Enable inbound calls** in the panel does
+that for the number the agent picks
+(`POST /numbers/%2B<digits>/application {"application_id": "<id>"}`). This moves
+the number off whatever application it was on, and the panel names that
+application first. The `+` must be percent-encoded. `/Number/` returns a bare
+`401 Unauthorised` that reads exactly like a credentials problem and is not
+one.
+
+**SIP direct sign-in** (an existing endpoint's SIP username and password, plus
+a caller ID) uses no account API. Do the binding yourself first:
+
+- **Console:** make an application with Answer URL and Hangup URL
+  `$PUBLIC_BASE/answer` (POST). Set it as the endpoint's application (Voice →
+  Endpoints), and attach the caller-ID number to it (Numbers).
+- **API:**
+
+  ```bash
+  curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Endpoint/$ENDPOINT_ID/" \
+    -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" \
+    -H "Content-Type: application/json" -d '{"app_id":"'"$APP_ID"'"}'
+  curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/numbers/%2B$DIGITS/application" \
+    -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" \
+    -H "Content-Type: application/json" -d '{"application_id":"'"$APP_ID"'"}'
+  ```
+
+  Run these from your own shell. Nothing here goes into `.env`.
+
+In SIP direct mode the backend never sees the SIP password. It records only
+`SIP user → caller ID` for webhook routing. Recordings and Enable inbound
+calls need account sign-in.
+
+**Use a separate endpoint per integration.** An endpoint binds to exactly one
+Vobiz application at a time, so sharing one between HubSpot and another CRM
+silently breaks whichever was configured first.
 
 ## 5. Get HubSpot developer access
 
@@ -184,5 +204,6 @@ Open a contact **with a phone number**, click **Call**, then
 Provider selection lives in that popover, not in Settings → Objects or
 Settings → Calling.
 
-Sign in with the Vobiz Auth ID/Token, allow the microphone, wait for **Ready**,
-and dial.
+Sign in with your Vobiz Auth ID and Auth Token (or SIP direct), pick a caller
+ID, allow the microphone, wait for **Ready**, and dial. To take calls, click
+**Enable inbound calls** once and pick the number.
