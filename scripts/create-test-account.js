@@ -14,25 +14,25 @@
  * Usage:
  *   node scripts/create-test-account.js "My Test Account"
  *
- * Requires hubspot.config.yml with a personal access key carrying
- * developer.test_accounts.write (the default set includes it).
+ * Requires a HubSpot CLI config with a personal access key carrying
+ * developer.test_accounts.write (the default set includes it): CLI v8 keeps it
+ * in ~/.hscli/config.yml (`npx hs account auth`); older CLIs wrote
+ * hubspot.config.yml in the repo root. Both are read, in that order.
  */
-const fs = require("node:fs");
-const path = require("node:path");
+const { readHubspotCliConfig } = require("./hubspot-cli-config");
 
 const NAME = process.argv[2] || "Calling Test Account";
-const CONFIG = path.join(__dirname, "..", "hubspot.config.yml");
 
 let pak, portalId;
 try {
-  const cfg = fs.readFileSync(CONFIG, "utf8");
-  pak = (cfg.match(/personalAccessKey:\s*(\S+)/) || [])[1];
-  portalId = Number((cfg.match(/portalId:\s*(\d+)/) || [])[1]);
-} catch {
-  console.error("No hubspot.config.yml — run `hs init` first.");
+  const cfg = readHubspotCliConfig();
+  pak = cfg.personalAccessKey;
+  portalId = cfg.accountId;
+  console.log(`Using account ${cfg.name || portalId} from ${cfg.file}`);
+} catch (err) {
+  console.error(err.message);
   process.exit(1);
 }
-if (!pak || !portalId) { console.error("hubspot.config.yml has no personalAccessKey/portalId."); process.exit(1); }
 
 (async () => {
   // Exchange the personal access key for a short-lived access token, the same
@@ -57,5 +57,5 @@ if (!pak || !portalId) { console.error("hubspot.config.yml has no personalAccess
   console.log(`  id     ${acct.id}`);
   console.log(`  name   ${acct.accountName}`);
   console.log(`  trial  ends ${acct.trialEndsAt}`);
-  console.log("\n  Install the app into it by opening /hubspot/install andselecting this account.");
+  console.log("\n  Install the app into it by opening /hubspot/install and selecting this account.");
 })().catch((e) => { console.error("✗", e.message); process.exit(1); });

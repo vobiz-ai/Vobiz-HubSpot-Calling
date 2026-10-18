@@ -8,8 +8,16 @@ zoho-orgs.json
 agents.json
 dist/
 
-# Runtime state written by the backend. agent-endpoints.json maps agents to
-# endpoint ids (no passwords); hubspot-tokens.json holds an OAuth refresh token.
+# HubSpot CLI config: holds a personal access key. CLI v8 writes ~/.hscli/;
+# older CLIs wrote hubspot.config.yml into the project.
+hubspot.config.yml
+.hscli/
+
+# Runtime state written by the backend, under DATA_DIR (default backend/data).
+# agent-endpoints.json maps agents to endpoint ids (no passwords);
+# hubspot-tokens.json holds an OAuth refresh token. The backend/*.json lines
+# cover files written before DATA_DIR existed.
+backend/data/
 backend/agent-endpoints.json
 backend/hubspot-tokens.json
 backend/tunnel-url.txt

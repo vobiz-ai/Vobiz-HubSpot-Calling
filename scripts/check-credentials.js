@@ -11,8 +11,9 @@ const sensitivePatterns = [
   /trycloudflare\.com/i,
 ];
 
-// test/ holds attacker-shaped hosts on purpose (CORS probes).
-const ignoredDirs = ["node_modules", ".git", "dist", "bin", "scratch", "test"];
+// test/ holds attacker-shaped hosts on purpose (CORS probes). data/ is the
+// backend's git-ignored runtime state (DATA_DIR), not source.
+const ignoredDirs = ["node_modules", ".git", "dist", "bin", "scratch", "test", "data"];
 
 function scanDirectory(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });

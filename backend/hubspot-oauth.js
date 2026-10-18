@@ -17,7 +17,11 @@ const path = require("node:path");
 
 const AUTHORIZE_URL = "https://app.hubspot.com/oauth/authorize";
 const TOKEN_URL = "https://api.hubapi.com/oauth/v1/token";
-const TOKEN_STORE = path.join(__dirname, "hubspot-tokens.json");
+const stateFiles = require("./state-files");
+
+const TOKEN_STORE = path.join(stateFiles.resolveDataDir(), "hubspot-tokens.json");
+// Written by versions before DATA_DIR; read only until the next save.
+const LEGACY_TOKEN_STORE = path.join(__dirname, "hubspot-tokens.json");
 
 const pendingStates = new Map();
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -26,7 +30,7 @@ let tokens = null;
 
 function loadTokens() {
   if (tokens) return tokens;
-  try { tokens = JSON.parse(fs.readFileSync(TOKEN_STORE, "utf8")); } catch { tokens = null; }
+  tokens = stateFiles.readJson(TOKEN_STORE, LEGACY_TOKEN_STORE);
   return tokens;
 }
 
@@ -35,7 +39,7 @@ function saveTokens(next) {
   try {
     // 0600: this holds a refresh token, a long-lived credential for the
     // customer's CRM.
-    fs.writeFileSync(TOKEN_STORE, JSON.stringify(next, null, 2), { mode: 0o600 });
+    stateFiles.writeJson(TOKEN_STORE, next);
   } catch (err) {
     console.error("[hubspot-oauth] could not persist tokens:", err.message);
   }
@@ -134,7 +138,10 @@ function status() {
 
 function disconnect() {
   tokens = null;
-  try { fs.unlinkSync(TOKEN_STORE); } catch { /* already gone */ }
+  // Both: a legacy file left behind would be read back as a live connection.
+  for (const f of [TOKEN_STORE, LEGACY_TOKEN_STORE]) {
+    try { fs.unlinkSync(f); } catch { /* already gone */ }
+  }
 }
 
 module.exports = { isConfigured, isConnected, buildAuthorizeUrl, consumeState, exchangeCode, refresh, accessToken, hubspotFetch, status, disconnect };

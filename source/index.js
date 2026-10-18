@@ -828,7 +828,7 @@ function renderInboundOptions(numbers, selected) {
     const opt = document.createElement("option");
     opt.value = n;
     const d = numberDetails.find(x => x.e164 === n);
-    opt.textContent = d && d.applicationId ? `${n} (now on app ${d.applicationId})` : n;
+    opt.textContent = d && d.applicationId ? `${n} (now on app ${d.applicationName || d.applicationId})` : n;
     if (n === selected) opt.selected = true;
     select.appendChild(opt);
   });
@@ -1037,11 +1037,14 @@ export async function setupInboundCalling() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Setup failed (${res.status})`);
     if (statusEl) {
-      statusEl.textContent = data.previousApplicationId
-        ? `Inbound calls to ${data.number} now ring this panel (moved from app ${data.previousApplicationId}).`
+      const previousApp = data.previousApplicationName
+        ? `"${data.previousApplicationName}" (${data.previousApplicationId})`
+        : data.previousApplicationId;
+      statusEl.textContent = previousApp
+        ? `Inbound calls to ${data.number} now ring this panel (moved from app ${previousApp}).`
         : `Inbound calls to ${data.number} now ring this panel.`;
       const d = numberDetails.find(x => x.e164 === data.number);
-      if (d) d.applicationId = data.appId;
+      if (d) { d.applicationId = data.appId; d.applicationName = data.appName; }
       statusEl.className = "hint is-ok";
     }
   } catch (err) {

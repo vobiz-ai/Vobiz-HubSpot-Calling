@@ -54,8 +54,10 @@ function publicBase() {
 
 const hubspotOAuth = require("./hubspot-oauth");
 
-const HUBSPOT_SCOPES = clean(process.env.HUBSPOT_SCOPES) ||
-  "oauth crm.objects.contacts.read crm.objects.contacts.write";
+// `oauth` only, matching requiredScopes in src/app/app-hsmeta.json. Each extra
+// scope makes the install demand CRM permissions a normal agent does not hold,
+// and the backend calls no CRM API that would need them.
+const HUBSPOT_SCOPES = clean(process.env.HUBSPOT_SCOPES) || "oauth";
 
 const HUBSPOT_ENV = {
   get HUBSPOT_CLIENT_ID() { return clean(process.env.HUBSPOT_CLIENT_ID); },
@@ -68,7 +70,11 @@ const HUBSPOT_ENV = {
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const SESSION_TTL_MS = Number(clean(process.env.SESSION_TTL_HOURS) || 12) * 3600 * 1000;
-const ENDPOINT_STORE = clean(process.env.AGENT_ENDPOINT_STORE) || path.join(__dirname, "agent-endpoints.json");
+const stateFiles = require("./state-files");
+const DATA_DIR = stateFiles.resolveDataDir();
+// AGENT_ENDPOINT_STORE, when set, names the file outright and is never migrated.
+const ENDPOINT_STORE = clean(process.env.AGENT_ENDPOINT_STORE) || path.join(DATA_DIR, "agent-endpoints.json");
+const LEGACY_ENDPOINT_STORE = clean(process.env.AGENT_ENDPOINT_STORE) ? null : path.join(__dirname, "agent-endpoints.json");
 
 // The one Vobiz application this integration creates in each account. Only
 // letters, digits, - and _ are accepted in app_name. An application is reused
@@ -217,13 +223,11 @@ function vobiz(method, apiPath, body, auth) {
 // the SIP password is NOT persisted. Each sign-in sets a fresh random password
 // on the agent's own endpoint and hands it to that agent's browser only.
 function loadEndpointStore() {
-  try { return JSON.parse(fs.readFileSync(ENDPOINT_STORE, "utf8")) || {}; } catch { return {}; }
+  return stateFiles.readJson(ENDPOINT_STORE, LEGACY_ENDPOINT_STORE) || {};
 }
 
 function saveEndpointStore(store) {
-  const tmp = `${ENDPOINT_STORE}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, ENDPOINT_STORE);
+  stateFiles.writeJson(ENDPOINT_STORE, store);
 }
 
 const freshSipPassword = () => `Vobiz${crypto.randomBytes(12).toString("hex")}9!`;
@@ -462,6 +466,31 @@ function serveWidgetAsset(res, rel) {
 }
 
 
+// Every application on the account (GET /Application/, paged), or null when
+// Vobiz refuses the listing.
+async function listApplications(auth) {
+  const appList = [];
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const page = await vobiz("GET", `/Application/?limit=100&offset=${offset}`, null, auth);
+    if (page.status < 200 || page.status >= 300) {
+      log(`  ⚠ listing applications for ${auth.authId} returned ${page.status}`);
+      return null;
+    }
+    const objs = (page.body && (page.body.objects || page.body.items)) || [];
+    appList.push(...objs);
+    if (objs.length < 100) break;
+  }
+  return appList;
+}
+
+// The name of application `appId`, or null if it is not listed. Used only to
+// tell the agent which app a number was moved off, so a failure is not fatal.
+async function applicationName(auth, appId) {
+  const list = await listApplications(auth).catch(() => null);
+  const app = (list || []).find((a) => idString(a.app_id || a.id) === appId);
+  return (app && app.app_name) || null;
+}
+
 /**
  * Find or create this integration's Application in the signed-in account.
  *
@@ -479,17 +508,8 @@ async function ensureHubspotApp(auth) {
   const answerUrl = `${base}/answer`;
   const urls = { answer_url: answerUrl, answer_method: "POST", hangup_url: answerUrl, hangup_method: "POST" };
 
-  const appList = [];
-  for (let offset = 0; offset < 1000; offset += 100) {
-    const page = await vobiz("GET", `/Application/?limit=100&offset=${offset}`, null, auth);
-    if (page.status < 200 || page.status >= 300) {
-      log(`  ⚠ listing applications for ${auth.authId} returned ${page.status}`);
-      return null;
-    }
-    const objs = (page.body && (page.body.objects || page.body.items)) || [];
-    appList.push(...objs);
-    if (objs.length < 100) break;
-  }
+  const appList = await listApplications(auth);
+  if (!appList) return null;
 
   let app = appList.find((a) => a.answer_url === answerUrl);
   if (!app) {
@@ -574,7 +594,11 @@ async function listAccountNumbers(auth, first) {
     for (const n of items) {
       const e164 = toE164(n.e164 || n.number);
       if (!e164) continue;
-      out.push({ e164, status: String(n.status || "").toLowerCase(), voiceEnabled: n.voice_enabled, applicationId: idString(n.application_id || n.app_id) || null });
+      out.push({
+        e164, status: String(n.status || "").toLowerCase(), voiceEnabled: n.voice_enabled,
+        applicationId: idString(n.application_id || n.app_id) || null,
+        applicationName: n.application_name || n.app_name || null,
+      });
     }
     const total = Number(res.body && res.body.total);
     if (!items.length) break;
@@ -868,7 +892,7 @@ const server = http.createServer(async (req, res) => {
     const all = await listAccountNumbers(auth, r);
     const callerIds = all.filter((n) => n.status === "active" && n.voiceEnabled !== false);
     const numbers = callerIds.map((n) => n.e164);
-    const numberDetails = callerIds.map((n) => ({ e164: n.e164, applicationId: n.applicationId }));
+    const numberDetails = callerIds.map((n) => ({ e164: n.e164, applicationId: n.applicationId, applicationName: n.applicationName }));
     const prev = accounts.get(authId);
     accounts.set(authId, { authToken, numbers: all.map((n) => n.e164), appId: prev && prev.authToken === authToken ? prev.appId : null });
 
@@ -987,11 +1011,14 @@ const server = http.createServer(async (req, res) => {
     const bound = await bindEndpoint(s.auth, s.epId, appId);
     const detail = (s.numberDetails || []).find((n) => n.e164 === number);
     const previousApplicationId = detail && detail.applicationId && detail.applicationId !== appId ? detail.applicationId : null;
+    // The numbers list may already carry the name; otherwise look it up.
+    const previousApplicationName = !previousApplicationId ? null
+      : detail.applicationName || await applicationName(s.auth, previousApplicationId);
     const attached = await attachNumber(s.auth, number, appId);
     if (!attached) return send(res, 502, { error: `Vobiz did not attach ${number} to the application` });
-    if (detail) detail.applicationId = appId;
+    if (detail) { detail.applicationId = appId; detail.applicationName = null; }
     log(`inbound enabled — ${number} on ${s.authId} -> app ${appId}`);
-    return send(res, 200, { ok: true, appId, appName: APP_NAME, answerUrl: `${base}/answer`, number, previousApplicationId, sipUser: s.sipUser, endpointBound: bound });
+    return send(res, 200, { ok: true, appId, appName: APP_NAME, answerUrl: `${base}/answer`, number, previousApplicationId, previousApplicationName, sipUser: s.sipUser, endpointBound: bound });
   }
 
   if ((p === "/recordings" || p.startsWith("/recordings/")) && method === "GET") {

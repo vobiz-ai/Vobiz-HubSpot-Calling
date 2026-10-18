@@ -135,7 +135,10 @@ session token. Routes that use the Vobiz API return 403 for SIP direct sessions.
 | What | Where | Survives a restart |
 | --- | --- | --- |
 | Sessions, Auth Tokens, call and recording metadata | Memory | No |
-| Agent → endpoint ID and SIP username | `agent-endpoints.json` (`AGENT_ENDPOINT_STORE`) | Yes |
-| HubSpot OAuth tokens | `backend/hubspot-tokens.json` | Yes |
+| Agent → endpoint ID and SIP username | `<DATA_DIR>/agent-endpoints.json` (or `AGENT_ENDPOINT_STORE`) | Yes |
+| HubSpot OAuth tokens | `<DATA_DIR>/hubspot-tokens.json` | Yes |
+
+`DATA_DIR` defaults to `backend/data`, created mode 0700; each file is written atomically with mode
+0600. Files an older version wrote directly into `backend/` are read until the next write.
 
 Because state is in memory, run a single backend instance.
