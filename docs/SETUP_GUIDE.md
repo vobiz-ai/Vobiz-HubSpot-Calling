@@ -1,209 +1,183 @@
-# Setup
+# Setup guide
 
-One-time setup, in order. Each step depends on the one before it.
+This guide takes you from a fresh clone to a working call in HubSpot. Do the steps in order; each one
+depends on the one before it. The [README](../README.md) has the same steps in short form, plus the
+configuration reference.
 
-You need: Node 20.12+, a Vobiz account with a number and balance (per team that signs in), a HubSpot account
-with developer tools, and `cloudflared` (or ngrok) for a public HTTPS URL.
+You need: a Vobiz account (Auth ID, Auth Token, an active voice-enabled number, call balance), a HubSpot
+account where you can install apps, a public HTTPS URL for the backend, and Node.js 20.12 or newer.
+
+Throughout, `https://calling.example.com` stands for your backend's public URL.
 
 ---
 
-## 1. Prove the Vobiz account
-
-Place a call with [rtc-demo.vobiz.ai](https://rtc-demo.vobiz.ai/). If that
-fails, nothing here will work and you will spend a day debugging the wrong
-layer.
-
-## 2. Nothing account-specific to configure
-
-There is no Vobiz Auth ID, Auth Token, number, SIP user or SIP password in
-`.env`, and no endpoint to create by hand. Each agent signs in to the panel with
-their own account's Auth ID and Auth Token, and the backend provisions
-everything in that account (step 4). Any number of Vobiz accounts can use one
-deployment.
-
-## 3. Configure and start the backend
+## 1. Run the backend
 
 ```bash
-cp backend/.env.example backend/.env    # PUBLIC_BASE, SIGNING_SECRET, HubSpot app keys
-npm install
-npx webpack                             # build the widget bundle
-npm start                               # :8092
-cloudflared tunnel --url http://localhost:8092
+git clone https://github.com/vobiz-ai/Vobiz-HubSpot-Calling.git
+cd Vobiz-HubSpot-Calling
+npm ci
+npm run build                        # builds the widget bundle into source/
+cp backend/.env.example backend/.env
 ```
 
-Put the tunnel URL in `PUBLIC_BASE` and restart.
+Edit `backend/.env`:
 
-**Check the answer URL before touching any UI:**
+```ini
+PUBLIC_BASE=https://calling.example.com
+SIGNING_SECRET=<long random string, e.g. from: openssl rand -hex 32>
+HUBSPOT_SCOPES=oauth
+```
+
+There are no Vobiz credentials in `.env`. Each agent signs in with their own Vobiz account from the
+panel, and the backend sets up that account at sign-in (step 8).
+
+Start the backend and make it reachable at your public URL (reverse proxy, load balancer or tunnel to
+port 8092):
 
 ```bash
-curl -s -X POST "$PUBLIC_BASE/answer" -d "Event=Hangup"
+npm start
 ```
 
-Must return XML (`<Response></Response>`). A dead answer URL produces the exact
-symptom people blame on registration: the customer answers, hears ringback,
-then "the agent could not be reached".
-
-## 4. What sign-in does in the agent's Vobiz account
-
-**Vobiz account sign-in** (Auth ID + Auth Token):
-
-1. Verifies the pair with `GET /Account/{authId}/numbers`. A non-2xx is a 401.
-2. Reads every page of the account's numbers. Active, voice-enabled numbers
-   become the caller-ID dropdown, and only those are accepted as caller ID.
-3. Finds or creates the application `vobiz-hubspot-calling-integration` with
-   `answer_url` and `hangup_url` = `$PUBLIC_BASE/answer` (POST). It reuses an
-   application only if the answer URL matches exactly or the name is exactly
-   that one. No other application in the account is touched.
-4. Finds or creates the agent's own endpoint (alias `hubspot-<agentId>`), sets
-   a fresh random password on it, and gives that password to that agent's
-   browser only. Vobiz rewrites the submitted username, so the stored one is
-   read back with `GET /Endpoint/{id}/`.
-5. Binds the endpoint to the application with `{"app_id":"<id>"}`, checks it
-   with a GET, and falls back to the documented `{"application": <id>}`.
-   App ids are 17 digits, larger than JavaScript can hold exactly as a
-   number, so they stay strings throughout.
-
-Sign-in never attaches a number. **Enable inbound calls** in the panel does
-that for the number the agent picks
-(`POST /numbers/%2B<digits>/application {"application_id": "<id>"}`). This moves
-the number off whatever application it was on, and the panel names that
-application first. The `+` must be percent-encoded. `/Number/` returns a bare
-`401 Unauthorised` that reads exactly like a credentials problem and is not
-one.
-
-**SIP direct sign-in** (an existing endpoint's SIP username and password, plus
-a caller ID) uses no account API. Do the binding yourself first:
-
-- **Console:** make an application with Answer URL and Hangup URL
-  `$PUBLIC_BASE/answer` (POST). Set it as the endpoint's application (Voice →
-  Endpoints), and attach the caller-ID number to it (Numbers).
-- **API:**
-
-  ```bash
-  curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Endpoint/$ENDPOINT_ID/" \
-    -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" \
-    -H "Content-Type: application/json" -d '{"app_id":"'"$APP_ID"'"}'
-  curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/numbers/%2B$DIGITS/application" \
-    -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" \
-    -H "Content-Type: application/json" -d '{"application_id":"'"$APP_ID"'"}'
-  ```
-
-  Run these from your own shell. Nothing here goes into `.env`.
-
-In SIP direct mode the backend never sees the SIP password. It records only
-`SIP user → caller ID` for webhook routing. Recordings and Enable inbound
-calls need account sign-in.
-
-**Use a separate endpoint per integration.** An endpoint binds to exactly one
-Vobiz application at a time, so sharing one between HubSpot and another CRM
-silently breaks whichever was configured first.
-
-## 5. Get HubSpot developer access
-
-Developer tools are gated separately from the CRM.
-
-- **Non-seat-based accounts**: Settings → Users & Teams → your user →
-  Permissions → **Developer tools access**. Super admins normally have it.
-- **Seat-based accounts**: assign a **Developer seat**. They cost nothing extra
-  and do not count against CRM user limits.
-
-If `/developer-overview/<portalId>` says "Your account doesn't have access to
-developer tools", this is why.
-
-## 6. Create the app
-
-Legacy public app creation was **sunset on 23 June 2026**. Apps are now
-developer projects.
+Check it from outside your network:
 
 ```bash
-npm install -g @hubspot/cli
-hs init                                  # browser auth, once
-npx hs project upload --account=<portalId> --force
-npx hs project info --account=<portalId> # prints the App ID under "App"
+curl -s https://calling.example.com/health
+curl -s -X POST https://calling.example.com/answer -d "Event=Hangup"
+curl -s -o /dev/null -w '%{http_code}\n' https://calling.example.com/widget/
 ```
 
-> **The App ID is only available here.** It is absent from the project payload,
-> and the legacy `/integrations/v1/applications` endpoints 404 now that legacy
-> apps are sunset. Everything about the calling extension is keyed on it.
+The second command must print `<Response></Response>`, and the third must print `200`. If Vobiz cannot
+fetch the answer URL, calls fail.
 
-`src/app/app-hsmeta.json` is committed with a `YOUR_PUBLIC_HOST` placeholder,
-because on a quick tunnel the real host changes every restart. Fill it in before
-uploading:
+## 2. Get HubSpot developer access
+
+Creating the app needs developer tools, which HubSpot grants separately from the CRM.
+
+- **Accounts without seats:** Settings → Users & Teams → your user → Permissions → turn on
+  **Developer tools access**. Super admins usually have it.
+- **Seat-based accounts:** assign yourself a **Developer seat**.
+
+Without it, HubSpot says "Your account doesn't have access to developer tools".
+
+## 3. Create the HubSpot app
+
+The app is a HubSpot developer project (`hsproject.json` and `src/app/app-hsmeta.json`). The HubSpot CLI
+is installed with the other dev dependencies.
 
 ```bash
-npm run sync-urls        # writes PUBLIC_BASE into redirectUrls and permittedUrls
+npx hs init                                # authenticate the CLI with your HubSpot account, once
+npm run sync-urls                          # writes PUBLIC_BASE into src/app/app-hsmeta.json
+npx hs project upload --account=<portalId>
+npx hs project info --account=<portalId>   # shows the App ID
 ```
 
-`distribution` is `private` in `src/app/app-hsmeta.json`. Marketplace
-distribution demands listing assets that do not exist yet and blocks the upload;
-switch it when you actually submit.
+`npm run sync-urls` fills your hostname into the manifest's OAuth redirect URL and its permitted URLs.
+HubSpot will only frame the widget from a host listed there. The command edits
+`src/app/app-hsmeta.json` in place; do not commit that change. Run it again, and upload again, whenever
+your public hostname changes.
 
-### Scopes
+`npx hs init` writes a `hubspot.config.yml` with your personal access key. Never commit it.
 
-The app requests **`oauth` and nothing else**, deliberately.
+The app asks for the `oauth` scope only. HubSpot logs calls using the agent's own session, so the app
+needs no CRM scopes. Keep `HUBSPOT_SCOPES=oauth` in `backend/.env` so the install request matches the
+app's `requiredScopes`; asking for contact scopes makes the install demand CRM permissions that agents
+usually do not have.
 
-HubSpot creates the call engagement itself from the SDK messages the widget
-sends, using the **agent's own session** — not this app's token. No CRM scope is
-involved.
+## 4. Connect the backend to the app
 
-Asking for `crm.objects.contacts.read`/`write` makes the install demand four
-user permissions (`contacts-writer`, team contact visibility, custom object
-editor, `mam-reports-virtual-user`) for capabilities the app never uses. A
-normal agent does not have those, and the install simply fails.
+In HubSpot, open **Development → Projects → your project → your app → Auth**. Copy the **Client ID**
+and **Client secret** into `backend/.env`:
 
-Add scopes back only when the backend actually calls the CRM API — that is, when
-`hubspotFetch` in `backend/hubspot-oauth.js` gets its first caller. Keep
-`HUBSPOT_SCOPES` in `.env` matching `requiredScopes`, or the consent screen and
-the token exchange disagree.
+```ini
+HUBSPOT_CLIENT_ID=...
+HUBSPOT_CLIENT_SECRET=...
+```
 
-## 7. Register the calling extension
+The redirect URL defaults to `https://calling.example.com/hubspot/callback`. If you set
+`HUBSPOT_REDIRECT_URI`, it must match `redirectUrls` in the manifest exactly. Restart the backend.
 
-**Calling is not a project feature.** There is no `calling/` directory in a
-project: `hs project upload` creates the app and nothing else. The widget URL,
-its size, and inbound support live behind a separate settings API.
+## 5. Register the calling widget
+
+The calling extension is configured through HubSpot's calling settings API, separately from the project
+upload. The widget URL is your backend's `/widget/` path, with the trailing slash.
 
 ```bash
-HUBSPOT_APP_ID=<id> HUBSPOT_DEVELOPER_API_KEY=<key> \
-  WIDGET_URL=https://<host>/widget npm run calling:configure
-
-npm run calling:show     # read back what HubSpot has
+HUBSPOT_APP_ID=<App ID from step 3> \
+HUBSPOT_DEVELOPER_API_KEY=<developer API key, from Development → Keys> \
+WIDGET_URL=https://calling.example.com/widget/ \
+npm run calling:configure
 ```
 
-- The widget URL must **also** appear in `permittedUrls.iframe` in
-  `src/app/app-hsmeta.json`, or HubSpot refuses to frame it.
-- `isReady` defaults on. Set `--not-ready` only for production gating: while
-  false, the app is hidden from the provider picker, which looks exactly like a
-  failed install.
-- The settings endpoint needs **POST** the first time. A first-time `PATCH`
-  404s, which reads like a wrong App ID. The script handles this.
+This sets the provider name (**Vobiz Calling**, or `CALLING_APP_NAME`), the widget URL and size, turns on
+inbound calling, uses HubSpot's separate calling window, and makes the provider available to users. The
+script reads these variables from your shell, not from `backend/.env`.
 
-## 8. Install into a test account
+To read back what HubSpot has stored:
 
-Installing a calling app requires the installing **user** to hold CRM
-permissions. If you are the only user on the portal, HubSpot's "request
-approval" flow has nobody to ask and dies with *"There was a problem fetching
-approvers"* — a dead end, not a transient error.
+```bash
+HUBSPOT_APP_ID=... HUBSPOT_DEVELOPER_API_KEY=... npm run calling:show
+```
 
-Developer test accounts have full permissions and are the intended place to test
-an app before listing:
+Options: `--no-inbound`, `--no-calling-window`, `--not-ready` (hides the provider from users).
+
+## 6. Install the app
+
+Open `https://calling.example.com/hubspot/install` and choose the HubSpot account to install into. You
+land on **Connected to HubSpot**. Confirm with:
+
+```bash
+curl -s https://calling.example.com/hubspot/status     # "connected": true
+```
+
+**Testing in a portal where you are the only user?** Installing a calling app needs a user with CRM
+permissions, and HubSpot's approval request has nobody to send to. The install fails with "There was a
+problem fetching approvers". Install into a **developer test account** instead: create one in HubSpot
+under your developer account's test accounts, or run
 
 ```bash
 npm run test-account "Vobiz Calling Test"
 ```
 
-Then open `https://<host>/hubspot/install` and **select the test account** on
-the consent screen. You should land on "Connected to HubSpot".
+which uses the `hubspot.config.yml` from `npx hs init` in the repository root. Then open
+`/hubspot/install` again and choose the test account.
 
-Confirm: `curl -s "$PUBLIC_BASE/hubspot/status"` → `"connected": true`.
+## 7. Choose Vobiz as the calling provider
 
-## 9. Select the provider and call
+In HubSpot, open a contact that has a phone number and click **Call**. At the bottom of the call popover,
+click **Change provider** and pick **Vobiz Calling**. Each user makes this choice once.
 
-Open a contact **with a phone number**, click **Call**, then
-**"Have another call provider? Change provider"** → **Vobiz Calling**.
+## 8. Sign in and call
 
-Provider selection lives in that popover, not in Settings → Objects or
-Settings → Calling.
+The panel opens on **Connecting**. Sign in on one of the two tabs.
 
-Sign in with your Vobiz Auth ID and Auth Token (or SIP direct), pick a caller
-ID, allow the microphone, wait for **Ready**, and dial. To take calls, click
-**Enable inbound calls** once and pick the number.
+**Vobiz account.** Enter the Auth ID (`MA_XXXXXXXX`) and Auth Token from the Vobiz Console → **API
+credentials**. On sign-in the backend:
+
+1. Checks the credentials with Vobiz. Wrong credentials are refused.
+2. Reads your account's numbers. Active, voice-enabled numbers fill the **Calling from** dropdown.
+3. Finds or creates the application `vobiz-hubspot-calling-integration` with its answer and hangup URLs
+   set to `https://calling.example.com/answer` (POST). No other application is changed.
+4. Finds or creates this agent's own SIP endpoint (alias `hubspot-<agent>`), sets a new random password,
+   links the endpoint to the application, and sends the SIP credentials to this agent's browser.
+
+Each HubSpot user gets their own endpoint, so any number of agents can sign in. Signing in does not
+move any of your numbers.
+
+**SIP direct.** Enter an existing endpoint's SIP username and password and the **Calling from** number
+(`+91XXXXXXXXXX`). First point the endpoint and the number at an application whose answer URL is
+`https://calling.example.com/answer`. The Console steps and API calls are in the
+[README](../README.md#sip-direct).
+
+When the badge shows **Ready**, allow the microphone, choose a caller ID, and dial a number with its
+country code, or click a phone number in HubSpot.
+
+## 9. Enable inbound calls
+
+Signed in with your Vobiz account, open **Enable inbound calls**, pick the number customers should call,
+and click **Enable inbound calls**. This attaches the number to `vobiz-hubspot-calling-integration` and
+moves it off the application it was on before. The dropdown shows each number's current application ID,
+and the confirmation names the application it moved from. Do this once per number.
+
+Calls to that number now ring every agent signed in to the panel with that Vobiz account. Answer from
+the overlay. HubSpot logs the call on the matching contact's timeline.
