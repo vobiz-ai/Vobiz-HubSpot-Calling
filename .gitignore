@@ -7,3 +7,11 @@ node_modules/
 zoho-orgs.json
 agents.json
 dist/
+
+# Runtime state written by the backend. agent-endpoints.json maps agents to
+# endpoint ids (no passwords); hubspot-tokens.json holds an OAuth refresh token.
+backend/agent-endpoints.json
+backend/hubspot-tokens.json
+backend/tunnel-url.txt
+# Build output
+source/demo-minimal-js.bundle.js

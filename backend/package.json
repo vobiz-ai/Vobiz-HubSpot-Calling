@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "tunnel": "node tunnel.js"
+    "tunnel": "node tunnel.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
@@ -21,5 +22,8 @@
     "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling/issues"
   },
   "homepage": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling#readme",
-  "author": "Vobiz"
+  "author": "Vobiz",
+  "engines": {
+    "node": ">=20.12"
+  }
 }

@@ -11,7 +11,8 @@
     "calling:configure": "node scripts/configure-calling.js",
     "calling:show": "node scripts/configure-calling.js --show",
     "test-account": "node scripts/create-test-account.js",
-    "sync-urls": "node scripts/sync-app-urls.js"
+    "sync-urls": "node scripts/sync-app-urls.js",
+    "test": "node --test backend/test/*.test.js"
   },
   "devDependencies": {
     "@hubspot/cli": "^8.14.0",
@@ -31,5 +32,8 @@
     "url": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling/issues"
   },
   "homepage": "https://github.com/vobiz-ai/Vobiz-HubSpot-Calling#readme",
-  "author": "Vobiz"
+  "author": "Vobiz",
+  "engines": {
+    "node": ">=20.12"
+  }
 }
