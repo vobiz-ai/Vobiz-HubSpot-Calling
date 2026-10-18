@@ -4,6 +4,8 @@ const path = require("path");
 const rootDir = path.join(__dirname, "..");
 const sensitivePatterns = [
   /SA_[A-Z0-9]{8}/i,
+  // A real Vobiz Auth ID. Placeholders (MA_XXXXXXXX) and test fakes (MA_TEST…) are fine.
+  /\bMA_(?!X{8}\b|TEST)[A-Z0-9]{8}\b/,
   /[a-f0-9]{64}/i,
   /tunnelmole\.net/i,
   /trycloudflare\.com/i,
