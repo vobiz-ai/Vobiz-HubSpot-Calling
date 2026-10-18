@@ -26,7 +26,6 @@ Edit `backend/.env`:
 ```ini
 PUBLIC_BASE=https://calling.example.com
 SIGNING_SECRET=<long random string, e.g. from: openssl rand -hex 32>
-HUBSPOT_SCOPES=oauth
 ```
 
 There are no Vobiz credentials in `.env`. Each agent signs in with their own Vobiz account from the
@@ -66,7 +65,7 @@ The app is a HubSpot developer project (`hsproject.json` and `src/app/app-hsmeta
 is installed with the other dev dependencies.
 
 ```bash
-npx hs init                                # authenticate the CLI with your HubSpot account, once
+npx hs account auth                        # authenticate the CLI with your HubSpot account, once
 npm run sync-urls                          # writes PUBLIC_BASE into src/app/app-hsmeta.json
 npx hs project upload --account=<portalId>
 npx hs project info --account=<portalId>   # shows the App ID
@@ -77,12 +76,13 @@ HubSpot will only frame the widget from a host listed there. The command edits
 `src/app/app-hsmeta.json` in place; do not commit that change. Run it again, and upload again, whenever
 your public hostname changes.
 
-`npx hs init` writes a `hubspot.config.yml` with your personal access key. Never commit it.
+`npx hs account auth` stores your personal access key in `~/.hscli/config.yml`. Older CLIs wrote it to a
+`hubspot.config.yml` in the repository; that file is git-ignored. Never commit either.
 
 The app asks for the `oauth` scope only. HubSpot logs calls using the agent's own session, so the app
-needs no CRM scopes. Keep `HUBSPOT_SCOPES=oauth` in `backend/.env` so the install request matches the
-app's `requiredScopes`; asking for contact scopes makes the install demand CRM permissions that agents
-usually do not have.
+needs no CRM scopes. The backend requests `oauth` by default, matching the app's `requiredScopes`; leave
+`HUBSPOT_SCOPES` unset (or `oauth`). Asking for contact scopes makes the install demand CRM permissions
+that agents usually do not have.
 
 ## 4. Connect the backend to the app
 
@@ -102,21 +102,21 @@ The redirect URL defaults to `https://calling.example.com/hubspot/callback`. If 
 The calling extension is configured through HubSpot's calling settings API, separately from the project
 upload. The widget URL is your backend's `/widget/` path, with the trailing slash.
 
+Put `HUBSPOT_APP_ID` and `HUBSPOT_DEVELOPER_API_KEY` in `backend/.env` (shell
+variables override it). The widget URL defaults to `${PUBLIC_BASE}/widget/`;
+set `WIDGET_URL` only to use a different one.
+
 ```bash
-HUBSPOT_APP_ID=<App ID from step 3> \
-HUBSPOT_DEVELOPER_API_KEY=<developer API key, from Development → Keys> \
-WIDGET_URL=https://calling.example.com/widget/ \
 npm run calling:configure
 ```
 
 This sets the provider name (**Vobiz Calling**, or `CALLING_APP_NAME`), the widget URL and size, turns on
-inbound calling, uses HubSpot's separate calling window, and makes the provider available to users. The
-script reads these variables from your shell, not from `backend/.env`.
+inbound calling, uses HubSpot's separate calling window, and makes the provider available to users.
 
 To read back what HubSpot has stored:
 
 ```bash
-HUBSPOT_APP_ID=... HUBSPOT_DEVELOPER_API_KEY=... npm run calling:show
+npm run calling:show
 ```
 
 Options: `--no-inbound`, `--no-calling-window`, `--not-ready` (hides the provider from users).
@@ -136,11 +136,13 @@ problem fetching approvers". Install into a **developer test account** instead: 
 under your developer account's test accounts, or run
 
 ```bash
+npx hs account auth        # once: writes ~/.hscli/config.yml (keep it out of git)
 npm run test-account "Vobiz Calling Test"
 ```
 
-which uses the `hubspot.config.yml` from `npx hs init` in the repository root. Then open
-`/hubspot/install` again and choose the test account.
+which reads the default account's personal access key from `~/.hscli/config.yml` (HubSpot CLI v8), or
+from a `hubspot.config.yml` an older CLI wrote in the repository root. Then open `/hubspot/install`
+again and choose the test account.
 
 ## 7. Choose Vobiz as the calling provider
 
@@ -176,8 +178,8 @@ country code, or click a phone number in HubSpot.
 
 Signed in with your Vobiz account, open **Enable inbound calls**, pick the number customers should call,
 and click **Enable inbound calls**. This attaches the number to `vobiz-hubspot-calling-integration` and
-moves it off the application it was on before. The dropdown shows each number's current application ID,
-and the confirmation names the application it moved from. Do this once per number.
+moves it off the application it was on before. The dropdown shows each number's current application,
+and the confirmation names the application it moved from, with its ID. Do this once per number.
 
 Calls to that number now ring every agent signed in to the panel with that Vobiz account. Answer from
 the overlay. HubSpot logs the call on the matching contact's timeline.

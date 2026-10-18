@@ -18,7 +18,7 @@ accounts.
 
 ### `npx hs project upload` fails
 
-- The CLI is not authenticated: run `npx hs init`.
+- The CLI is not authenticated: run `npx hs account auth`.
 - It asks whether to create the project: answer yes, or pass `--force`.
 
 ### "There was a problem fetching approvers"
@@ -29,8 +29,9 @@ HubSpot's approval request has nobody to go to. Install into a developer test ac
 
 ### The install asks for contacts, team visibility or custom-object permissions
 
-The install is requesting CRM scopes. Set `HUBSPOT_SCOPES=oauth` in `backend/.env`, restart, and open
-`/hubspot/install` again. The app needs only `oauth`.
+The install is requesting CRM scopes: `HUBSPOT_SCOPES` is set to more than `oauth`. Remove it from
+`backend/.env` (the default is `oauth`), restart, and open `/hubspot/install` again. The app needs only
+`oauth`.
 
 ### "Authorisation rejected" on the callback page
 

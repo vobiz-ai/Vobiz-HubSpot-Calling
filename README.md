@@ -93,7 +93,6 @@ The full walkthrough, including where each HubSpot setting lives, is in
    ```ini
    PUBLIC_BASE=https://calling.example.com
    SIGNING_SECRET=<a long random string, e.g. from: openssl rand -hex 32>
-   HUBSPOT_SCOPES=oauth
    ```
 
    `HUBSPOT_CLIENT_ID` and `HUBSPOT_CLIENT_SECRET` come from the HubSpot app you create in step 5.
@@ -115,7 +114,7 @@ The full walkthrough, including where each HubSpot setting lives, is in
 5. **Create the HubSpot app** with the HubSpot CLI (included as a dev dependency).
 
    ```bash
-   npx hs init                                   # authenticate the CLI once
+   npx hs account auth                           # authenticate the CLI once (~/.hscli/config.yml)
    npm run sync-urls                             # writes PUBLIC_BASE into src/app/app-hsmeta.json
    npx hs project upload --account=<portalId>
    npx hs project info --account=<portalId>      # shows the App ID
@@ -126,11 +125,11 @@ The full walkthrough, including where each HubSpot setting lives, is in
 
    `npm run sync-urls` edits `src/app/app-hsmeta.json` in place. Do not commit that change.
 
-6. **Register the calling widget with HubSpot.** The widget URL ends in `/widget/`.
+6. **Register the calling widget with HubSpot.** Add `HUBSPOT_APP_ID` and `HUBSPOT_DEVELOPER_API_KEY`
+   to `backend/.env` (or export them; the shell wins), then:
 
    ```bash
-   HUBSPOT_APP_ID=<app id> HUBSPOT_DEVELOPER_API_KEY=<developer API key> \
-   WIDGET_URL=https://calling.example.com/widget/ npm run calling:configure
+   npm run calling:configure    # widget URL defaults to <PUBLIC_BASE>/widget/
    ```
 
 7. **Install the app** by opening `https://calling.example.com/hubspot/install` and choosing your
@@ -166,8 +165,8 @@ Outbound calls show the number you pick. The backend refuses any number that is 
 **Enable inbound calls.** Under **Enable inbound calls**, pick a number and click the button. This
 attaches the number to the `vobiz-hubspot-calling-integration` application, so calls to it ring your
 signed-in agents. A number can belong to only one application, so this **moves the number off the
-application it is on now**. The dropdown shows the current application's ID next to each number
-(`now on app …`), and the confirmation names the application the number moved from. You only need to
+application it is on now**. The dropdown shows the current application next to each number
+(`now on app …`), and the confirmation names the application the number moved from, with its ID. You only need to
 do this once per number.
 
 ### SIP direct
@@ -240,12 +239,13 @@ The backend reads `backend/.env` (or the process environment).
 | `SIGNING_SECRET` | Yes in production | random per start | Signs recording playback links. If unset, links stop working after every restart. |
 | `HUBSPOT_CLIENT_ID` | Yes | none | Your HubSpot app's Client ID. |
 | `HUBSPOT_CLIENT_SECRET` | Yes | none | Your HubSpot app's Client secret. |
-| `HUBSPOT_SCOPES` | Yes | `oauth crm.objects.contacts.read crm.objects.contacts.write` | Scopes requested at install. Set it to `oauth` so it matches the app's `requiredScopes`. |
+| `HUBSPOT_SCOPES` | No | `oauth` | Scopes requested at install. Matches the app's `requiredScopes`; extra scopes make the install ask agents for CRM permissions. |
 | `HUBSPOT_REDIRECT_URI` | No | `<PUBLIC_BASE>/hubspot/callback` | OAuth redirect. Must match `redirectUrls` in `src/app/app-hsmeta.json`. |
 | `PORT` | No | `8092` | Port the backend listens on. |
 | `RECORDING_URL_TTL_SECONDS` | No | `900` | How long a recording playback link stays valid. |
 | `SESSION_TTL_HOURS` | No | `12` | How long a widget sign-in lasts. |
-| `AGENT_ENDPOINT_STORE` | No | `backend/agent-endpoints.json` | File that maps each agent to their Vobiz endpoint. |
+| `DATA_DIR` | No | `backend/data` | Directory for the backend's state files (created mode 0700; files 0600). A relative path is taken from `backend/`. Files an older version left in `backend/` are read until the next write moves them here. |
+| `AGENT_ENDPOINT_STORE` | No | `<DATA_DIR>/agent-endpoints.json` | File that maps each agent to their Vobiz endpoint. |
 | `ALLOWED_ORIGINS` | No | none | Extra browser origins allowed to call the backend, comma separated. HubSpot, `localhost` and `PUBLIC_BASE` are always allowed. |
 | `TUNNEL_URL` | No | none | Used as the public URL when `PUBLIC_BASE` is not set. |
 | `VOBIZ_API_URL` | No | `https://api.vobiz.ai` | Vobiz REST API. Leave the default. |
@@ -254,13 +254,13 @@ The backend reads `backend/.env` (or the process environment).
 `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_FROM_NUMBER`, `VOBIZ_SIP_USER` and `VOBIZ_SIP_PASSWORD` are
 ignored if set. Agents bring their own credentials when they sign in.
 
-`npm run calling:configure` reads these from your shell, not from `backend/.env`:
+`npm run calling:configure` reads these from `backend/.env` and your shell; a shell variable wins:
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `HUBSPOT_APP_ID` | Yes | none | The App ID from `npx hs project info`. |
 | `HUBSPOT_DEVELOPER_API_KEY` | Yes | none | Your HubSpot developer API key (Development → Keys). |
-| `WIDGET_URL` | Yes | none | `https://calling.example.com/widget/` |
+| `WIDGET_URL` | No | `<PUBLIC_BASE>/widget/` | The widget URL HubSpot loads. |
 | `CALLING_APP_NAME` | No | `Vobiz Calling` | The provider name agents see in HubSpot. |
 | `HUBSPOT_CALLING_API_VERSION` | No | `2026-09` | Version segment of HubSpot's calling settings API. |
 
@@ -276,11 +276,10 @@ agents. `npm run calling:show` prints the current settings.
   application is re-pointed.
 - **Run exactly one backend instance.** Sign-ins, calls and the Vobiz Auth Tokens are held in memory.
   A second instance would not know about agents signed in to the first.
-- **Keep `backend/` on persistent storage.** `agent-endpoints.json` (or `AGENT_ENDPOINT_STORE`) and
-  `hubspot-tokens.json` are written there. If they are lost, agents' endpoints are found again by alias
-  and you reinstall the app from `/hubspot/install`.
+- **Keep `DATA_DIR` on persistent storage** (default `backend/data`). `agent-endpoints.json` (or
+  `AGENT_ENDPOINT_STORE`) and `hubspot-tokens.json` are written there. If they are lost, agents'
+  endpoints are found again by alias and you reinstall the app from `/hubspot/install`.
 - **Set `SIGNING_SECRET`** to a fixed random value so recording links survive restarts.
-- **Set `HUBSPOT_SCOPES=oauth`.**
 - **Upload the app manifest with your real hostname** (`npm run sync-urls`, then `npx hs project upload`).
   The app's `distribution` is `private`.
 
@@ -293,7 +292,7 @@ agents. `npm run calling:show` prints the current settings.
   password. An agent can only read their own SIP credentials.
 - **SIP direct passwords never reach the backend.** The backend stores only which caller ID belongs to
   which SIP username.
-- **On disk**, the backend keeps `agent-endpoints.json` (agent → endpoint ID and SIP username, no
+- **On disk**, in `DATA_DIR` (mode 0700), the backend keeps `agent-endpoints.json` (agent → endpoint ID and SIP username, no
   passwords) and `hubspot-tokens.json` (the HubSpot OAuth tokens), both readable only by the backend's
   user (mode 0600).
 - **Recording links carry no credentials.** Each link is signed for one recording in one account and
@@ -317,7 +316,7 @@ agents. `npm run calling:show` prints the current settings.
 | **Vobiz Calling** is not in the provider list | The app is not installed in this portal, the calling widget is not registered, or it was registered with `--not-ready`. | Run `npm run calling:show`; re-run `npm run calling:configure`; install from `/hubspot/install` into this portal. |
 | "Your account doesn't have access to developer tools" | Your HubSpot user lacks developer access. | Grant **Developer tools access**, or assign a **Developer seat**. |
 | "There was a problem fetching approvers" | You are installing into a portal where you are the only user, so there is nobody to approve. | Install into a developer test account. |
-| Install asks for contacts and custom-object permissions | `HUBSPOT_SCOPES` is not `oauth`. | Set `HUBSPOT_SCOPES=oauth`, restart, and install again. |
+| Install asks for contacts and custom-object permissions | `HUBSPOT_SCOPES` is set to more than `oauth`. | Remove it (or set `HUBSPOT_SCOPES=oauth`), restart, and install again. |
 | "Authorisation rejected" after install | The install was not started from `/hubspot/install`, took over 10 minutes, or the backend restarted mid-install. | Open `/hubspot/install` again. |
 | "Vobiz did not accept that Auth ID and Auth Token" | Wrong credentials, or the Console login password was used. | Copy both again from Console → **API credentials**. |
 | Status never reaches **Ready**; "Registration failed" | The browser could not register the SIP endpoint. In SIP direct, usually the wrong username. | Account mode: sign in again. SIP direct: use the stored username from Console → Voice → Endpoints. |
@@ -376,8 +375,10 @@ scripts/                     configure-calling, sync-app-urls, create-test-accou
 docs/                        setup guide, architecture, troubleshooting
 ```
 
-`npm run test-account "<name>"` creates a HubSpot developer test account. It reads the
-`hubspot.config.yml` that `npx hs init` writes in the repository root; never commit that file.
+`npm run test-account "<name>"` creates a HubSpot developer test account. It reads the default
+account's personal access key from `~/.hscli/config.yml` (written by `npx hs account auth`), or from
+a `hubspot.config.yml` an older CLI wrote in the repository root. Both hold a credential; both are
+git-ignored.
 
 ## Support
 

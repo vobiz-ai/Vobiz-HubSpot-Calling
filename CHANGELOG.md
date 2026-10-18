@@ -22,8 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Inbound rings every signed-in agent; the first to answer takes the call.
 - Session tokens: `/login` returns one, and every widget route requires it.
 - `npm test`: black-box tests against a fake Vobiz API, run in CI.
+- `DATA_DIR` (default `backend/data`, 0700) holds `agent-endpoints.json` and
+  `hubspot-tokens.json` (0600). Files left in `backend/` are read until the
+  next write.
+- **Enable inbound calls** names the application the number moved from.
+- `npm run test-account` reads the HubSpot CLI v8 config
+  (`~/.hscli/config.yml`) as well as a repo-root `hubspot.config.yml`.
+- `npm run calling:configure` reads `backend/.env` (the shell wins) and
+  defaults `WIDGET_URL` to `<PUBLIC_BASE>/widget/`.
 
 ### Fixed
+
+- `HUBSPOT_SCOPES` defaulted to contact scopes, so an unset value made the
+  install demand CRM permissions agents lack. It now defaults to `oauth`.
+- `hubspot.config.yml` (a personal access key) was not git-ignored.
 
 - Inbound with no matching agent rang every signed-in agent, across accounts.
 - Sign-in attached the selected number to the application, moving it off

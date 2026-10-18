@@ -19,34 +19,63 @@
  *           as a telephony fault and is not one.
  *
  * Usage:
- *   HUBSPOT_APP_ID=... HUBSPOT_DEVELOPER_API_KEY=... \
- *   WIDGET_URL=https://host/widget node scripts/configure-calling.js
+ *   npm run calling:configure
+ *
+ * HUBSPOT_APP_ID, HUBSPOT_DEVELOPER_API_KEY, WIDGET_URL and PUBLIC_BASE are
+ * read from backend/.env and from the shell; the shell wins. WIDGET_URL
+ * defaults to ${PUBLIC_BASE}/widget/.
  *
  *   --no-inbound            leave inbound disabled
  *   --no-calling-window     do not use HubSpot's detached calling window
  *   --show                  print the current settings and exit
  */
-const APP_ID = (process.env.HUBSPOT_APP_ID || "").trim();
-const API_KEY = (process.env.HUBSPOT_DEVELOPER_API_KEY || "").trim();
-const WIDGET_URL = (process.env.WIDGET_URL || "").trim();
-const NAME = (process.env.CALLING_APP_NAME || "Vobiz Calling").trim();
+const fs = require("node:fs");
+const path = require("node:path");
+const util = require("node:util");
 
-// The version segment is dated and moves. Override if HubSpot publishes a newer
-// one than this was written against.
-const VERSION = (process.env.HUBSPOT_CALLING_API_VERSION || "2026-09").trim();
+const ENV_FILE = path.join(__dirname, "..", "backend", ".env");
+const clean = (v) => (v || "").trim().replace(/^["']|["']$/g, "");
+
+/**
+ * Settings from `envFile` overlaid with `env` (the shell). A variable set in
+ * the shell, even to an empty string, is not overridden by the file — the same
+ * rule as process.loadEnvFile.
+ */
+function loadConfig(env = process.env, envFile = ENV_FILE) {
+  let fromFile = {};
+  try { fromFile = util.parseEnv(fs.readFileSync(envFile, "utf8")); } catch { /* no .env: shell only */ }
+  const merged = { ...fromFile, ...env };
+  const publicBase = clean(merged.PUBLIC_BASE).replace(/\/+$/, "");
+  return {
+    appId: clean(merged.HUBSPOT_APP_ID),
+    apiKey: clean(merged.HUBSPOT_DEVELOPER_API_KEY),
+    widgetUrl: clean(merged.WIDGET_URL) || (publicBase ? `${publicBase}/widget/` : ""),
+    name: clean(merged.CALLING_APP_NAME) || "Vobiz Calling",
+    // The version segment is dated and moves. Override if HubSpot publishes a
+    // newer one than this was written against.
+    version: clean(merged.HUBSPOT_CALLING_API_VERSION) || "2026-09",
+  };
+}
+
+if (require.main !== module) {
+  module.exports = { loadConfig };
+  return;
+}
+
+const { appId: APP_ID, apiKey: API_KEY, widgetUrl: WIDGET_URL, name: NAME, version: VERSION } = loadConfig();
 
 const SHOW = process.argv.includes("--show");
 const INBOUND = !process.argv.includes("--no-inbound");
 const CALLING_WINDOW = !process.argv.includes("--no-calling-window");
 
 if (!APP_ID || !API_KEY) {
-  console.error("Set HUBSPOT_APP_ID and HUBSPOT_DEVELOPER_API_KEY.\n");
+  console.error("Set HUBSPOT_APP_ID and HUBSPOT_DEVELOPER_API_KEY (in backend/.env or the shell).\n");
   console.error("  App ID             Development > Projects (or Legacy Apps) > your app");
   console.error("  Developer API key  Development > Keys");
   process.exit(1);
 }
 if (!SHOW && !WIDGET_URL) {
-  console.error("Set WIDGET_URL to the public HTTPS URL of the widget, e.g. https://<host>/widget");
+  console.error("Set PUBLIC_BASE (the widget is then ${PUBLIC_BASE}/widget/) or WIDGET_URL, e.g. https://<host>/widget/");
   process.exit(1);
 }
 if (WIDGET_URL && !WIDGET_URL.startsWith("https://")) {

@@ -37,7 +37,9 @@ function fakeVobiz() {
   const accounts = {
     // Account one's endpoints accept {"app_id":"<string>"}; account two's only
     // the documented {"application": <int>}, so both bind paths are exercised.
-    [A1]: { token: T1, bindField: "app_id", numbers: [DID, DID2], apps: [], appId: APP_ID_1,
+    // PREV_APP is where DID2 is routed before "Enable inbound calls".
+    [A1]: { token: T1, bindField: "app_id", numbers: [DID, DID2], appId: APP_ID_1,
+      apps: [{ app_id: PREV_APP, app_name: "Old-IVR", answer_url: "https://customer.example.com/old-ivr" }],
       recordings: [{ recording_id: "rec-a1", recording_url: "https://media.not-allowed.example/a1.mp3", call_uuid: "c1" }] },
     [A2]: { token: T2, bindField: "application", numbers: [DID_B], appId: APP_ID_2,
       // Someone else's app that merely mentions HubSpot: must never be repointed.
@@ -279,7 +281,7 @@ test("the same agent id on two accounts maps to two endpoints", async () => {
 });
 
 test("sign-in binds the endpoint with the exact 17-digit app id ({app_id} first, {application} fallback) and does NOT attach any number", async () => {
-  // Account one had no apps: one was created with this integration's name.
+  // Account one had no app of ours: one was created with this integration's name.
   const creates = reqsTo(new RegExp(`/Account/${A1}/Application/$`));
   assert.equal(creates.length, 1, "one application created for account one");
   assert.equal(creates[0].body.app_name, APP_NAME);
@@ -479,6 +481,14 @@ test("Enable inbound calls attaches the chosen DID to this account's application
   assert.match(attaches[0].url, /\/numbers\/%2B910000000002\/application$/);
   assert.match(attaches[0].raw, new RegExp(`"application_id":"${APP_ID_1}"`));
   assert.equal(r.json.previousApplicationId, PREV_APP, "says which app the number moved from");
+  assert.equal(r.json.previousApplicationName, "Old-IVR", "and its name, from GET /Application/");
+});
+
+test("a number not on any other app reports no previous application", async () => {
+  const r = await request(port, "POST", "/setup-inbound", { headers: bearer(alice.token), body: { number: DID } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.previousApplicationId, null);
+  assert.equal(r.json.previousApplicationName, null);
 });
 
 test("the older provision route is the same action and cannot move PUBLIC_BASE", async () => {
@@ -610,6 +620,37 @@ test("with the endpoint store wiped, the agent's endpoint is found again by its 
   assert.equal(reqsTo(/\/Endpoint\/$/).length, creates, "no new endpoint");
   const aa = await request(port, "GET", "/agent", { headers: bearer(a.json.token) });
   assert.equal(aa.json.sipUser, alice.sipUser);
+});
+
+test("HubSpot install asks for the oauth scope only, by default", async () => {
+  const p2 = nextPort++;
+  const s2 = await startServer({ ...env, PORT: String(p2), HUBSPOT_CLIENT_ID: "cid", HUBSPOT_CLIENT_SECRET: "csecret" });
+  try {
+    const r = await request(p2, "GET", "/hubspot/install");
+    assert.equal(r.status, 302);
+    assert.equal(new URL(r.headers.location).searchParams.get("scope"), "oauth");
+  } finally {
+    await stop(s2);
+  }
+});
+
+test("with DATA_DIR and no AGENT_ENDPOINT_STORE, state goes in DATA_DIR: dir 0700, file 0600", async () => {
+  const p2 = nextPort++;
+  const dataDir = path.join(tmp, "state", "data");
+  const { AGENT_ENDPOINT_STORE, ...rest } = env;
+  const s2 = await startServer({ ...rest, PORT: String(p2), DATA_DIR: dataDir });
+  try {
+    const r = await login("dana", A1, T1, p2);
+    assert.equal(r.status, 200, r.text);
+    const file = path.join(dataDir, "agent-endpoints.json");
+    assert.ok(JSON.parse(fs.readFileSync(file, "utf8"))[`${A1}:dana`]);
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(dataDir).mode & 0o777, 0o700, "DATA_DIR is 0700");
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600, "store is 0600");
+    }
+  } finally {
+    await stop(s2);
+  }
 });
 
 test("leftover VOBIZ_AUTH_ID / VOBIZ_FROM_NUMBER / VOBIZ_SIP_* in env are ignored: another account still signs in", async () => {
